@@ -1,0 +1,10 @@
+# Normalize line endings to LF on checkin, and let Git decide what is text.
+* text=auto eol=lf
+
+# Explicitly treat common binary types as binary (never normalize/diff).
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.gz binary
+*.tgz binary
