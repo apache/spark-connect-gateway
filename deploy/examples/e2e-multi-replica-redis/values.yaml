@@ -1,0 +1,74 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Helm values for the multi-replica + Redis affinity store
+# walkthrough. Differs from the e2e-smoke values in three ways:
+#
+#   1. replicaCount: 2 (two gateway pods)
+#   2. affinityStore.type: redis (instead of memory)
+#   3. redis.enabled: true (bundle the StatefulSet)
+#
+# Everything else mirrors e2e-smoke.
+
+image:
+  repository: scg
+  tag: e2e
+  pullPolicy: Never
+
+# Two gateway replicas. Each binds sessions through the shared Redis
+# so a client landing on either replica sees the same binding.
+replicaCount: 2
+
+backendDiscovery:
+  type: k8s
+  k8s:
+    namespace: spark-connect
+    serviceName: spark-connect
+    port: 15002
+
+affinityStore:
+  # The whole point of this scenario. memory affinity store would
+  # mean each gateway replica builds its own (user, session) ->
+  # backend map and they wouldn't agree.
+  type: redis
+  redis:
+    # URL synthesized by the chart from the bundled Redis below;
+    # leave empty unless redis.enabled=false.
+    url: ""
+    keyPrefix: scg
+    sessionTtlSecs: 3600
+    opTtlSecs: 900
+
+redis:
+  # Bring up the chart's bundled Redis StatefulSet.
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    # Use the kind cluster's default storage class.
+    storageClass: ""
+    size: 1Gi
+    accessModes:
+      - ReadWriteOnce
+
+auth:
+  type: none
+
+audit:
+  enabled: true
+  logSuccessfulRpcs: false

@@ -1,0 +1,66 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- /*
+  Opt-in NetworkPolicy enforcing the gateway trust boundary: the
+  backend Spark Connect servers only accept gRPC ingress from the
+  gateway pods. The gateway's auth and multi-tenancy guarantees
+  hold only if clients cannot reach the backends directly — the
+  backends trust UserContext.user_id as presented, so the gateway
+  must be the sole writer of it.
+
+  The backends are not chart-managed, so the operator supplies the
+  pod labels that select them (and their namespace when it differs
+  from the release namespace).
+
+  NetworkPolicy semantics: once a pod is selected by an Ingress
+  policy, everything not whitelisted is denied. If your backends
+  receive other legitimate ingress — executor-to-driver traffic on
+  operator-managed clusters (e.g. block manager / driver RPC
+  ports), Spark UI access — whitelist it via additionalIngress.
+  Kubelet health probes are not affected by NetworkPolicy.
+*/}}
+{{- if .Values.backendNetworkPolicy.enabled }}
+{{- if not .Values.backendNetworkPolicy.backendPodLabels }}
+{{- fail "backendNetworkPolicy.enabled requires backendNetworkPolicy.backendPodLabels" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "scg.fullname" . }}-backend-ingress
+  namespace: {{ .Values.backendNetworkPolicy.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "scg.gateway.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .Values.backendNetworkPolicy.backendPodLabels | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "scg.gateway.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.backendNetworkPolicy.grpcPort }}
+    {{- with .Values.backendNetworkPolicy.additionalIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

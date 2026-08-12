@@ -1,0 +1,72 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Helm values for the JWT auth e2e walkthrough. Differs from
+# e2e-smoke only in the `auth:` block — everything else is
+# deliberately identical so the only variable the test exercises
+# is the auth path.
+#
+# We use the HMAC (`HS256`) flavour of JWT because it removes the
+# need to generate or distribute an RSA key pair for the
+# walkthrough — both the gateway and the client share one secret
+# string. Production deployments should prefer RSA/EC (`RS256` etc.)
+# with `key.kind: pemFile` so the signing key never leaves the IdP.
+
+image:
+  repository: scg
+  tag: e2e
+  pullPolicy: Never
+
+replicaCount: 1
+
+backendDiscovery:
+  type: k8s
+  k8s:
+    namespace: spark-connect
+    serviceName: spark-connect
+    port: 15002
+
+affinityStore:
+  type: memory
+
+redis:
+  enabled: false
+
+auth:
+  type: jwt
+  jwt:
+    algorithms: [HS256]
+    # The HMAC secret. Templated into the gateway's ConfigMap as
+    # plaintext — fine for a kind walkthrough, NOT what production
+    # should do. In production, mount the secret from a K8s Secret
+    # (the chart's templating only takes `secret:` inline today;
+    # filing that as a future chart improvement).
+    key:
+      kind: hmacSecret
+      secret: e2e-auth-jwt-walkthrough-secret-not-for-production
+    # Optional standard JWT claims. Set to demonstrate the chart's
+    # templating and to make the failure path "issuer mismatch"
+    # demonstrable.
+    issuer: "scg-e2e-issuer"
+    audience: "scg"
+    # Where to look up `user_id` / `tenant` / `groups` inside the
+    # JWT payload. Defaults are `sub`, none, none respectively.
+    userIdClaim: sub
+    tenantClaim: tenant
+    groupsClaim: groups
+
+audit:
+  enabled: true
+  logSuccessfulRpcs: false

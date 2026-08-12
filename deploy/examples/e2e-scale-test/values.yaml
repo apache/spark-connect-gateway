@@ -1,0 +1,51 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Helm values for the E2E smoke test. Overrides the chart defaults
+# at deploy/helm/scg/values.yaml to:
+#   1. Use the locally built image (`scg:e2e`) — never pulled.
+#   2. Run a single replica (the smoke test doesn't exercise HA).
+#   3. Use in-process memory affinity store (skip bundled Redis).
+#   4. Discover the Spark Connect backends via K8s Endpoints watch.
+#   5. Skip auth (anonymous) so the PySpark client doesn't need a token.
+
+image:
+  repository: scg
+  tag: e2e
+  pullPolicy: Never        # critical — kind has the image loaded; never go to a registry
+
+replicaCount: 1
+
+backendDiscovery:
+  type: k8s
+  k8s:
+    namespace: spark-connect
+    serviceName: spark-connect
+    port: 15002
+
+affinityStore:
+  type: memory
+
+# Disable the bundled Redis StatefulSet — memory affinity needs no Redis.
+redis:
+  enabled: false
+
+auth:
+  type: none
+
+# Single tenant, no rate limiting, audit on. Defaults are fine for the rest.
+audit:
+  enabled: true
+  logSuccessfulRpcs: false

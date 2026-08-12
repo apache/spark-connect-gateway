@@ -1,0 +1,103 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Spark Connect server Deployment + Service for the trust-boundary
+# end-to-end walkthrough — like the e2e-smoke manifest, but the
+# server enforces a pre-shared token
+# (`spark.connect.authenticate.token`, Spark 4.0+): every request
+# must carry `authorization: Bearer <token>` or the server rejects
+# it with UNAUTHENTICATED.
+#
+# The token comes from the `scg-backend-token` Secret (created in
+# the README's step 4) via an env var; `$(SCG_BACKEND_TOKEN)` in the
+# command list is Kubernetes env-var expansion, resolved before the
+# process starts.
+#
+# One replica — this walkthrough asserts the auth boundary, not
+# pool routing (e2e-smoke covers that).
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-connect
+  namespace: spark-connect
+  labels:
+    app: spark-connect-server
+spec:
+  selector:
+    app: spark-connect-server
+  ports:
+    - name: grpc
+      port: 15002
+      targetPort: 15002
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-connect-server
+  namespace: spark-connect
+  labels:
+    app: spark-connect-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-connect-server
+  template:
+    metadata:
+      labels:
+        app: spark-connect-server
+    spec:
+      containers:
+        - name: spark-connect
+          image: apache/spark:4.0.0
+          env:
+            - name: SCG_BACKEND_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: scg-backend-token
+                  key: token
+          # `--wait` keeps start-connect-server.sh in the foreground
+          # (see the e2e-smoke README for why).
+          command:
+            - /opt/spark/sbin/start-connect-server.sh
+            - --wait
+            - --conf
+            - spark.connect.grpc.binding.port=15002
+            - --conf
+            - spark.driver.bindAddress=0.0.0.0
+            - --conf
+            - spark.connect.authenticate.token=$(SCG_BACKEND_TOKEN)
+          ports:
+            - containerPort: 15002
+              name: grpc
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          readinessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 60
+            periodSeconds: 15
