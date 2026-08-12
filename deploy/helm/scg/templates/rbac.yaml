@@ -1,0 +1,70 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{- /*
+  Endpoints-watch RBAC. The gateway's K8s discovery needs
+  get/list/watch on endpoints in every namespace it watches a
+  Service in. That set comes from two places: the (optional)
+  top-level backendDiscovery when its type is k8s, and every
+  tenantPools.overrides entry of type k8s. Collect the distinct
+  namespaces and emit one Role + RoleBinding pair per namespace.
+*/}}
+{{- $namespaces := dict }}
+{{- if .Values.backendDiscovery }}
+{{- if eq .Values.backendDiscovery.type "k8s" }}
+{{- $_ := set $namespaces .Values.backendDiscovery.k8s.namespace true }}
+{{- end }}
+{{- end }}
+{{- range $tenant, $disc := .Values.tenantPools.overrides }}
+{{- if eq $disc.type "k8s" }}
+{{- $_ := set $namespaces $disc.namespace true }}
+{{- end }}
+{{- end }}
+{{- range $ns, $unused := $namespaces }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "scg.fullname" $ }}-endpoints-watcher
+  namespace: {{ $ns }}
+  labels:
+    {{- include "scg.gateway.labels" $ | nindent 4 }}
+rules:
+  # The K8s pool watches the Service's Endpoints object via kube-rs
+  # to track which Spark Connect pods are healthy. The standard
+  # endpoints/endpointslices reads are sufficient — no writes.
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "scg.fullname" $ }}-endpoints-watcher
+  namespace: {{ $ns }}
+  labels:
+    {{- include "scg.gateway.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "scg.fullname" $ }}-endpoints-watcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "scg.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+---
+{{- end }}

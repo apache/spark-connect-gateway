@@ -1,0 +1,89 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Address the gateway will bind to. Default :15003 (0.0.0.0:15003).
+bind_addr: ":15003"
+
+# Address for the admin HTTP server (Prometheus /metrics + /healthz +
+# /readyz). Set to null to disable. Default :9090.
+admin_addr: ":9090"
+
+# Static list of Spark Connect server backends. Phase 1 shorthand —
+# equivalent to `backend_discovery: { type: static, addresses: [...] }`.
+backends:
+  - "spark-connect-1.svc.cluster.local:15002"
+  - "spark-connect-2.svc.cluster.local:15002"
+
+# Phase 2 alternative: watch a Kubernetes Service's Endpoints.
+# (Use this *instead of* `backends:` above — not both.)
+#
+# backend_discovery:
+#   type: k8s
+#   namespace: spark-connect
+#   service_name: spark-connect
+#   port: 15002
+
+# Per-tenant rate limiting (Phase 3.6). Token bucket per tenant with
+# an optional per-user dimension. Off by default — turn `enabled: true`
+# and size the buckets for your workload. See docs/deployment.md for
+# tuning starting points.
+#
+# rate_limit:
+#   enabled: true
+#   default:
+#     rpcs_per_second: 100
+#     burst: 200
+#   overrides:
+#     team-a:
+#       rpcs_per_second: 500
+#       burst: 1000
+
+# Per-tenant backend pool overrides. The `backends:` / `backend_discovery:`
+# above is the *default* pool; per-tenant entries here override it.
+#
+# tenant_pools:
+#   on_unknown_tenant: use_default  # or `reject` for strict isolation
+#   overrides:
+#     team-a:
+#       type: static
+#       addresses: ["spark-team-a-1:15002", "spark-team-a-2:15002"]
+#     team-b:
+#       type: k8s
+#       namespace: spark-team-b
+#       service_name: spark-connect
+#       port: 15002
+
+# How the gateway figures out which tenant each inbound RPC belongs
+# to. Default = tenant comes from auth claim, falls back to "default"
+# when missing — preserves Phase 1/2 single-tenant behaviour.
+#
+# tenant_resolver:
+#   source: from_claim          # or: from_metadata | always_default
+#   # header: x-tenant          # only when source=from_metadata
+#   on_missing: use_default     # or: reject (for strict SaaS-style isolation)
+#   default_name: default
+
+# Where to keep the (tenant, user_id, session_id) -> backend affinity table.
+# Default `memory` works for a single gateway replica. For replicas > 1
+# (HA / multi-pod deployments), point at a Redis instance so all
+# replicas see the same bindings — without it, a client that lands on
+# a different replica gets re-bound to a different backend.
+#
+# affinity_store:
+#   type: redis
+#   url: "redis://redis-cluster:6379"  # supports redis://:pw@host:6379/2
+#   key_prefix: "scg"                   # default "scg"
+#   session_ttl_secs: 3600              # default 1h, refreshed on reads
+#   op_ttl_secs: 900                    # default 15min
