@@ -27,6 +27,7 @@ header:
     - ".gitignore"
     - ".gitattributes"
     - "**/.helmignore"
+    - "**/.rat-excludes"
     - "**/*.md"
     - "**/*.json"
     # Generated Helm NOTES shown to users on install
