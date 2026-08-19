@@ -18,6 +18,7 @@ resolver = "2"
 members = [
     "crates/genproto",
     "crates/routing",
+    "crates/config",
 ]
 
 [workspace.package]
