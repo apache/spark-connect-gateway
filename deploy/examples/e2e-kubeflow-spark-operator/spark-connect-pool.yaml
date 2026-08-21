@@ -1,0 +1,135 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Two `SparkConnect` custom resources managed by the
+# [Kubeflow Spark Operator](https://github.com/kubeflow/spark-operator),
+# plus one aggregating `Service` that fronts both drivers as a single
+# pool for the gateway to watch.
+#
+# How the topology lines up with the other walkthroughs:
+#
+#   * e2e-smoke uses one `Deployment` with `replicas: 2`, so a single
+#     Service's Endpoints list contains both pods.
+#   * The Kubeflow operator's `SparkConnect` CRD is one-CR-per-driver
+#     (each driver is an operator-managed long-lived service, not a
+#     `Deployment.replicas` knob). Each CR makes its own Service
+#     named `<cr-name>-server`.
+#
+# To collapse those two driver pods into a single pool the gateway
+# can watch — keeping the same flat topology as e2e-smoke and
+# letting us reuse the same gateway `values.yaml` shape — we tag
+# both `SparkConnect` driver pod templates with a shared label
+# (`scg-pool: shared`) and stand up a plain `Service` selecting
+# that label. That Service's `Endpoints` list ends up with both
+# driver pod IPs, which is exactly what the gateway expects.
+#
+# The operator-built per-CR Services (`scg-test-a-server`,
+# `scg-test-b-server`) still exist and are still useful — for
+# direct kubectl access, port-forward, web UI — but the gateway
+# doesn't watch them.
+
+apiVersion: sparkoperator.k8s.io/v1alpha1
+kind: SparkConnect
+metadata:
+  name: scg-test-a
+  namespace: default
+spec:
+  sparkVersion: 4.0.1
+  server:
+    template:
+      metadata:
+        labels:
+          # The label the aggregating `Service` selects on. Picked
+          # to be specific (`scg-pool`) so a future tenant that runs
+          # its own Spark Connect servers in the same namespace
+          # doesn't accidentally join this pool.
+          scg-pool: shared
+      spec:
+        containers:
+          - name: spark-kubernetes-driver
+            image: docker.io/library/spark:4.0.1
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests:
+                cpu: 500m
+                memory: 1Gi
+              limits:
+                cpu: 1
+                memory: 1Gi
+        serviceAccount: spark-operator-spark
+  executor:
+    instances: 1
+    cores: 1
+    memory: 512m
+    template:
+      spec:
+        containers:
+          - name: spark-kubernetes-executor
+            image: docker.io/library/spark:4.0.1
+            imagePullPolicy: IfNotPresent
+---
+apiVersion: sparkoperator.k8s.io/v1alpha1
+kind: SparkConnect
+metadata:
+  name: scg-test-b
+  namespace: default
+spec:
+  sparkVersion: 4.0.1
+  server:
+    template:
+      metadata:
+        labels:
+          scg-pool: shared
+      spec:
+        containers:
+          - name: spark-kubernetes-driver
+            image: docker.io/library/spark:4.0.1
+            imagePullPolicy: IfNotPresent
+            resources:
+              requests:
+                cpu: 500m
+                memory: 1Gi
+              limits:
+                cpu: 1
+                memory: 1Gi
+        serviceAccount: spark-operator-spark
+  executor:
+    instances: 1
+    cores: 1
+    memory: 512m
+    template:
+      spec:
+        containers:
+          - name: spark-kubernetes-executor
+            image: docker.io/library/spark:4.0.1
+            imagePullPolicy: IfNotPresent
+---
+# Aggregating Service: collects every Spark Connect driver pod
+# tagged `scg-pool: shared` into one Endpoints list. The gateway's
+# `backendDiscovery.k8s.serviceName` points at this Service's
+# name (`scg-pool`).
+apiVersion: v1
+kind: Service
+metadata:
+  name: scg-pool
+  namespace: default
+spec:
+  selector:
+    scg-pool: shared
+  ports:
+    - name: spark-connect-server
+      port: 15002
+      targetPort: 15002
+  type: ClusterIP

@@ -16,10 +16,21 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/genproto",
+    "crates/gateway",
+    "crates/proxy",
     "crates/routing",
-    "crates/config",
+    "crates/store-memory",
+    "crates/store-redis",
+    "crates/healthcheck",
+    "crates/tenant",
+    "crates/ratelimit",
+    "crates/audit",
+    "crates/pool-static",
+    "crates/pool-k8s",
     "crates/auth",
+    "crates/observability",
+    "crates/config",
+    "crates/genproto",
 ]
 
 [workspace.package]

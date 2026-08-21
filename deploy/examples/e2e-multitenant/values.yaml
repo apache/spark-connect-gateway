@@ -1,0 +1,92 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Helm values for the multi-tenant routing e2e walkthrough.
+#
+# Three things differ from e2e-smoke / e2e-auth-jwt:
+#   1. Two per-tenant pool overrides (`team-a` and `team-b`),
+#      each pointing at its own Service.
+#   2. `onUnknownTenant: reject` — strict SaaS-style isolation.
+#      Any RPC whose JWT claim is neither `team-a` nor `team-b`
+#      is rejected with PermissionDenied.
+#   3. JWT auth on (reusing the HMAC pattern from e2e-auth-jwt)
+#      because the tenant comes from the JWT's `tenant` claim.
+#
+# No default `backendDiscovery` — under `onUnknownTenant: reject`
+# the default pool is never selected (unmatched tenants are
+# rejected before pool selection), so it may be omitted entirely.
+# Every admitted tenant routes through its own override pool below.
+
+image:
+  repository: scg
+  tag: e2e
+  pullPolicy: Never
+
+replicaCount: 1
+
+# Strict multi-tenant mode: no default pool.
+backendDiscovery: null
+
+affinityStore:
+  type: memory
+
+redis:
+  enabled: false
+
+# JWT auth — tenant is derived from the `tenant` claim (see
+# tenantResolver.source below).
+auth:
+  type: jwt
+  jwt:
+    algorithms: [HS256]
+    key:
+      kind: hmacSecret
+      secret: e2e-multitenant-walkthrough-secret-not-for-production
+    issuer: "scg-e2e-issuer"
+    audience: "scg"
+    userIdClaim: sub
+    tenantClaim: tenant
+    groupsClaim: groups
+
+# Per-tenant backend pools. The two team pools are completely
+# independent K8s watchers — `team-a` watches Service
+# `spark-connect-team-a`, `team-b` watches `spark-connect-team-b`.
+# A session bound to one tenant can never accidentally land on
+# the other tenant's pods.
+tenantPools:
+  onUnknownTenant: reject
+  overrides:
+    team-a:
+      type: k8s
+      namespace: spark-connect
+      serviceName: spark-connect-team-a
+      port: 15002
+    team-b:
+      type: k8s
+      namespace: spark-connect
+      serviceName: spark-connect-team-b
+      port: 15002
+
+# Resolve tenant from the JWT's `tenant` claim. With
+# onMissing=reject, any token without a `tenant` claim — even if
+# the signature is otherwise valid — is rejected.
+tenantResolver:
+  source: from_claim
+  onMissing: reject
+  defaultName: default
+
+audit:
+  enabled: true
+  logSuccessfulRpcs: false

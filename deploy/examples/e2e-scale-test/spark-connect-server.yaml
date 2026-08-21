@@ -1,0 +1,101 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Minimal Spark Connect server Deployment + Service for the K8s
+# end-to-end smoke test. This is *not* representative of a real
+# Spark Connect deployment — real deployments use the
+# spark-kubernetes-operator and its SparkConnectServer CR (see
+# deploy/examples/spark-connect-server/ for that pattern). What we
+# need here is just a backend the gateway can talk to.
+#
+# Two replicas so the gateway exercises pool routing across more
+# than one backend.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-connect
+  namespace: spark-connect
+  labels:
+    app: spark-connect-server
+spec:
+  selector:
+    app: spark-connect-server
+  ports:
+    - name: grpc
+      port: 15002
+      targetPort: 15002
+  # ClusterIP with no sticky behaviour — affinity is the gateway's job.
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-connect-server
+  namespace: spark-connect
+  labels:
+    app: spark-connect-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: spark-connect-server
+  template:
+    metadata:
+      labels:
+        app: spark-connect-server
+    spec:
+      containers:
+        - name: spark-connect
+          image: apache/spark:4.0.0
+          # `--wait` makes start-connect-server.sh stay in the foreground
+          # (sets SPARK_NO_DAEMONIZE=1). Without it, the script forks
+          # spark-daemon.sh into the background and the container exits.
+          #
+          # We don't need `--packages org.apache.spark:spark-connect_2.13`
+          # because the apache/spark:4.0.0 image already ships
+          # spark-connect_2.13-4.0.0.jar in $SPARK_HOME/jars. (`--packages`
+          # also fails out of the box because Ivy needs a writable $HOME,
+          # and the image's runtime user has none.)
+          command:
+            - /opt/spark/sbin/start-connect-server.sh
+            - --wait
+            - --conf
+            - spark.connect.grpc.binding.port=15002
+            - --conf
+            - spark.driver.bindAddress=0.0.0.0
+          ports:
+            - containerPort: 15002
+              name: grpc
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          # The Spark Connect server doesn't ship a /healthz endpoint;
+          # use the gRPC port as the readiness signal. tcpSocket is
+          # the lowest-common-denominator probe that works here.
+          readinessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 60
+            periodSeconds: 15

@@ -1,0 +1,52 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Helm values for the Kubeflow Spark Operator integration
+# walkthrough. Differs from e2e-smoke only in
+# `backendDiscovery.k8s.serviceName`, which points at the
+# aggregating Service defined in `spark-connect-pool.yaml`
+# (which selects driver pods managed by the operator).
+#
+# Everything else mirrors e2e-smoke — single replica, memory
+# affinity store, auth: none — to keep the only variable under
+# test as the integration with the kubeflow/spark-operator
+# `SparkConnect` CRD.
+
+image:
+  repository: scg
+  tag: e2e
+  pullPolicy: Never
+
+replicaCount: 1
+
+backendDiscovery:
+  type: k8s
+  k8s:
+    namespace: default
+    serviceName: scg-pool
+    port: 15002
+
+affinityStore:
+  type: memory
+
+redis:
+  enabled: false
+
+auth:
+  type: none
+
+audit:
+  enabled: true
+  logSuccessfulRpcs: false

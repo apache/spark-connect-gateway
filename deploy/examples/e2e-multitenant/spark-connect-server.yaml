@@ -1,0 +1,158 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Two parallel Spark Connect server Deployments + Services. Each
+# tenant gets its own pool of one pod so the audit log shows
+# exactly one `backend` IP per tenant — making the
+# tenant-to-backend mapping unambiguous in step 6 of the
+# walkthrough.
+#
+# In a real deployment each tenant pool would have multiple
+# replicas and live in its own namespace (or even its own
+# cluster). We collapse to one namespace here to keep the
+# walkthrough short; the namespace boundary is not what the
+# tenant routing relies on — that's the Service the gateway
+# watches via its `tenantPools.overrides.*` config.
+
+# ---- team-a ----
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-connect-team-a
+  namespace: spark-connect
+  labels:
+    app: spark-connect-team-a
+spec:
+  selector:
+    app: spark-connect-team-a
+  ports:
+    - name: grpc
+      port: 15002
+      targetPort: 15002
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-connect-team-a
+  namespace: spark-connect
+  labels:
+    app: spark-connect-team-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-connect-team-a
+  template:
+    metadata:
+      labels:
+        app: spark-connect-team-a
+    spec:
+      containers:
+        - name: spark-connect
+          image: apache/spark:4.0.0
+          command:
+            - /opt/spark/sbin/start-connect-server.sh
+            - --wait
+            - --conf
+            - spark.connect.grpc.binding.port=15002
+            - --conf
+            - spark.driver.bindAddress=0.0.0.0
+          ports:
+            - containerPort: 15002
+              name: grpc
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          readinessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 60
+            periodSeconds: 15
+---
+
+# ---- team-b ----
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-connect-team-b
+  namespace: spark-connect
+  labels:
+    app: spark-connect-team-b
+spec:
+  selector:
+    app: spark-connect-team-b
+  ports:
+    - name: grpc
+      port: 15002
+      targetPort: 15002
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-connect-team-b
+  namespace: spark-connect
+  labels:
+    app: spark-connect-team-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-connect-team-b
+  template:
+    metadata:
+      labels:
+        app: spark-connect-team-b
+    spec:
+      containers:
+        - name: spark-connect
+          image: apache/spark:4.0.0
+          command:
+            - /opt/spark/sbin/start-connect-server.sh
+            - --wait
+            - --conf
+            - spark.connect.grpc.binding.port=15002
+            - --conf
+            - spark.driver.bindAddress=0.0.0.0
+          ports:
+            - containerPort: 15002
+              name: grpc
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          readinessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 15002
+            initialDelaySeconds: 60
+            periodSeconds: 15
