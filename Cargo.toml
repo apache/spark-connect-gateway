@@ -19,6 +19,7 @@ members = [
     "crates/genproto",
     "crates/routing",
     "crates/config",
+    "crates/auth",
 ]
 
 [workspace.package]
