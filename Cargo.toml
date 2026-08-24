@@ -20,6 +20,7 @@ members = [
     "crates/routing",
     "crates/config",
     "crates/auth",
+    "crates/observability",
 ]
 
 [workspace.package]
