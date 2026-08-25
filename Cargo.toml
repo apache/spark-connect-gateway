@@ -21,6 +21,8 @@ members = [
     "crates/config",
     "crates/auth",
     "crates/observability",
+    "crates/audit",
+    "crates/ratelimit",
 ]
 
 [workspace.package]
