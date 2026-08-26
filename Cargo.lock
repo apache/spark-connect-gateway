@@ -2353,6 +2353,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "scg-tenant"
+version = "0.1.0"
+dependencies = [
+ "scg-auth",
+ "thiserror 2.0.20",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"

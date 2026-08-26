@@ -23,6 +23,7 @@ members = [
     "crates/observability",
     "crates/audit",
     "crates/ratelimit",
+    "crates/tenant",
 ]
 
 [workspace.package]
