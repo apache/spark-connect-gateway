@@ -24,6 +24,8 @@ members = [
     "crates/audit",
     "crates/ratelimit",
     "crates/tenant",
+    "crates/store-memory",
+    "crates/pool-static",
 ]
 
 [workspace.package]
