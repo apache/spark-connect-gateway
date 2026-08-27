@@ -2305,6 +2305,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "scg-healthcheck"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "scg-routing",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tracing",
+]
+
+[[package]]
 name = "scg-observability"
 version = "0.1.0"
 dependencies = [
@@ -2368,6 +2382,20 @@ dependencies = [
  "parking_lot",
  "scg-routing",
  "tokio",
+]
+
+[[package]]
+name = "scg-store-redis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "redis",
+ "scg-routing",
+ "testcontainers-modules",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2932,6 +2960,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -2989,6 +3018,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "tonic-health"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcfab99db777fba2802f0dfa861d1628d1ae916fb199d29819941f139ae85082"
+dependencies = [
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
 ]
 
 [[package]]
