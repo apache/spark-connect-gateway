@@ -2330,6 +2330,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "scg-pool-static"
+version = "0.1.0"
+dependencies = [
+ "scg-routing",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "scg-ratelimit"
 version = "0.1.0"
 dependencies = [
@@ -2350,6 +2358,16 @@ dependencies = [
  "parking_lot",
  "tokio",
  "tonic",
+]
+
+[[package]]
+name = "scg-store-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "scg-routing",
+ "tokio",
 ]
 
 [[package]]
