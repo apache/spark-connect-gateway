@@ -26,6 +26,8 @@ members = [
     "crates/tenant",
     "crates/store-memory",
     "crates/pool-static",
+    "crates/store-redis",
+    "crates/healthcheck",
 ]
 
 [workspace.package]
