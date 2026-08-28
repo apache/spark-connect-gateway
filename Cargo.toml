@@ -28,6 +28,7 @@ members = [
     "crates/pool-static",
     "crates/store-redis",
     "crates/healthcheck",
+    "crates/pool-k8s",
 ]
 
 [workspace.package]
