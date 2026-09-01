@@ -61,7 +61,7 @@ prost-types = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "tls-ring", "tls-webpki-roots"] }
 opentelemetry-semantic-conventions = "0.31"
 opentelemetry-stdout = "0.31"
