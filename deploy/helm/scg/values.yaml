@@ -1,0 +1,390 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Default values for the spark-connect-gateway Helm chart.
+# All knobs are documented inline. The defaults give you a 2-replica
+# HA gateway in front of a static backend list, with a single-replica
+# bundled Redis providing cross-replica session affinity. No auth, no
+# OTel tracing — both opt-in.
+
+# -- Optional override of the chart name (`{{ .Chart.Name }}`).
+nameOverride: ""
+# -- Override the full release name. Has no default; usually unused.
+fullnameOverride: ""
+
+image:
+  repository: spark-connect-gateway
+  # -- Image tag. Defaults to the chart's appVersion when null.
+  tag: ""
+  pullPolicy: IfNotPresent
+  # -- Optional image pull secrets, e.g. for private registries.
+  pullSecrets: []
+
+# -- Number of gateway replicas. Multi-replica HA requires
+#    `affinityStore.type: redis` (default), otherwise stickiness
+#    breaks across replicas.
+replicaCount: 2
+
+# -- Resources for the gateway container.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# -- Pod-level scheduling controls.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+
+# Service exposing the gateway externally to clients (and the admin
+# port to Prometheus / probes).
+service:
+  type: ClusterIP
+  # gRPC port consumers connect to via `sc://...:15003`
+  grpcPort: 15003
+  # Admin port: /metrics, /healthz, /readyz
+  adminPort: 9090
+
+# Probes hit the admin port. /readyz returns 200 once the backend
+# pool has at least one entry; /healthz returns 200 unconditionally.
+probes:
+  enabled: true
+  livenessPath: /healthz
+  readinessPath: /readyz
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# -- Backend discovery for the *default* pool. `static` is the
+#    default; switch to `k8s` to have the gateway watch a Spark
+#    Connect Service's Endpoints object (the
+#    apache/spark-kubernetes-operator pattern).
+#
+#    May be set to `null` — but only when
+#    `tenantPools.onUnknownTenant: reject` is set with at least one
+#    override: in that strict multi-tenant mode the default pool is
+#    never selected (unmatched tenants are rejected before pool
+#    selection), so no discovery source is needed. The chart and the
+#    gateway binary both validate this rule.
+backendDiscovery:
+  # `static` or `k8s`
+  type: static
+  # Used when type=static. host:port entries.
+  static:
+    addresses:
+      - "spark-connect-1.svc.cluster.local:15002"
+      - "spark-connect-2.svc.cluster.local:15002"
+  # Used when type=k8s. Watches the named Service's Endpoints.
+  k8s:
+    namespace: spark-connect
+    serviceName: spark-connect
+    port: 15002
+
+# Authentication mode. Defaults to anonymous (no auth) — fine for a
+# trusted in-cluster network, NOT for production exposure.
+#
+# `groups` (on static tokens) and `groupsClaim` (on JWT/OIDC) are
+# recorded on `session.create` / `session.release` audit events so
+# operators can see which memberships each identity carries. They
+# do NOT currently gate any RPC — the gateway has no authorization
+# layer beyond authentication + tenant resolution.
+auth:
+  # one of: none | static | jwt | oidc
+  type: none
+
+  # type: static — bearer-token allowlist
+  static:
+    tokens: []
+    # - token: "alice-secret"
+    #   userId: "alice"
+    #   tenant: "team-a"
+    #   groups: ["devs"]
+
+  # type: jwt — local-key JWT verification
+  jwt:
+    algorithms: ["RS256"]
+    issuer: ""
+    audience: ""
+    userIdClaim: "sub"
+    tenantClaim: ""
+    groupsClaim: ""
+    # exactly one of {pemFile, pemInline, hmacSecret} required
+    key:
+      kind: pemInline   # pemFile | pemInline | hmacSecret
+      pem: ""           # used when kind=pemInline
+      path: ""          # used when kind=pemFile (path inside the pod)
+      secret: ""        # used when kind=hmacSecret
+
+  # type: oidc — remote JWKS / discovery
+  oidc:
+    algorithms: ["RS256"]
+    issuer: ""
+    audience: ""
+    discoveryUrl: ""    # e.g. https://idp.example.com/.well-known/openid-configuration
+    jwksUrl: ""         # used directly if you don't want discovery
+    userIdClaim: "sub"
+    tenantClaim: ""
+    groupsClaim: ""
+    refreshFloorSecs: 60
+
+# Where the gateway keeps its (user_id, session_id) -> backend
+# affinity table. Multi-replica deployments MUST use `redis` —
+# memory store is per-pod and breaks Spark Connect's session
+# invariant when load balancers fan out across replicas.
+affinityStore:
+  # one of: memory | redis
+  type: redis
+  redis:
+    # Used only when redis.enabled=false (external Redis).
+    # When redis.enabled=true the chart synthesizes the URL from the
+    # bundled StatefulSet; set this to override.
+    url: ""
+    keyPrefix: scg
+    sessionTtlSecs: 3600
+    opTtlSecs: 900
+
+# Bundled Redis StatefulSet. Disable to bring your own (managed
+# Redis, ElastiCache, Bitnami Redis chart, etc.) and set
+# affinityStore.redis.url to point at it.
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 1Gi
+    accessModes:
+      - ReadWriteOnce
+
+# Per-tenant rate limiting. Token-bucket per tenant
+# (and optionally per-user inside a tenant). Off by default — every
+# RPC is admitted. Turn on `enabled` and set `default.rpcsPerSecond`
+# + `default.burst` to apply a uniform limit; add entries under
+# `overrides` for tenants that need different limits.
+#
+# Per-user limits are independent of the tenant-level ones; both
+# buckets must have a token for the RPC to proceed. Leaving the
+# per-user fields at 0 disables that dimension.
+#
+# rateLimit:
+#   enabled: true
+#   default:
+#     rpcsPerSecond: 100
+#     burst: 200
+#     perUserRpcsPerSecond: 0
+#     perUserBurst: 0
+#   overrides:
+#     team-a:
+#       rpcsPerSecond: 500
+#       burst: 1000
+#       perUserRpcsPerSecond: 50
+#       perUserBurst: 100
+#
+# `store: memory` (the default) enforces buckets per gateway replica
+# — a 3-replica deployment with default.rpcsPerSecond=100 admits up
+# to 300 RPS cluster-wide. `store: redis` shares state across all
+# replicas via an atomic token-bucket Lua script, so the configured
+# rate matches the cluster-wide enforcement. See `redis:` below.
+rateLimit:
+  enabled: false
+  # one of: memory | redis
+  store: memory
+  # Redis settings — only consulted when store=redis. The fail
+  # behaviour `open` admits the RPC and bumps
+  # scg_rate_limit_redis_errors_total when Redis is unreachable;
+  # `closed` rejects with ResourceExhausted instead (recommended
+  # only for strict-SaaS deployments where availability of the
+  # limiter is part of the security model).
+  redis:
+    url: "redis://redis:6379"
+    keyPrefix: "scg-rl"
+    keyTtlSecs: 3600
+    # one of: open | closed
+    onFailure: open
+  default:
+    rpcsPerSecond: 0
+    burst: 0
+    perUserRpcsPerSecond: 0
+    perUserBurst: 0
+  overrides: {}
+
+# Per-tenant backend pool overrides. The `backendDiscovery`
+# above is the *default* pool — used for the `default` tenant and for
+# any tenant not explicitly listed below. Add an entry under
+# `tenantPools.overrides` to give a specific tenant its own pool with
+# its own discovery shape (static list, K8s Endpoints, etc.).
+#
+# `onUnknownTenant` decides what happens when an inbound RPC carries
+# a tenant that has neither an entry here nor (under reject) any
+# fallback pool:
+#   use_default — route through the default pool (back-compat)
+#   reject       — return PermissionDenied to the client
+#
+# tenantPools:
+#   onUnknownTenant: use_default
+#   overrides:
+#     team-a:
+#       type: static
+#       addresses: ["spark-a-1:15002", "spark-a-2:15002"]
+#     team-b:
+#       type: k8s
+#       namespace: spark-team-b
+#       serviceName: spark-connect
+#       port: 15002
+tenantPools:
+  onUnknownTenant: use_default
+  overrides: {}
+
+# Pre-shared token the gateway presents to backends (as
+# `authorization: Bearer <token>`) — for backend Spark Connect
+# servers started with `spark.connect.authenticate.token`
+# (Spark 4.0+). Holding the token only in the gateway is the
+# auth-layer half of the trust-boundary enforcement: a client that
+# bypasses the gateway is rejected by the backend itself with
+# UNAUTHENTICATED. (`backendNetworkPolicy` below is the network-layer
+# half; production should use both.)
+#
+# Tokens come from existing Kubernetes Secrets — the chart mounts
+# them into the pod as env vars, so the token never appears in the
+# rendered ConfigMap. The gateway reads them once at startup:
+# rotating a Secret requires a rollout restart (and a matching
+# restart of the backends). The default token applies to every pool;
+# a tenant listed in `tenantOverrides` presents its own token to its
+# own pool instead (the tenant should also appear in
+# `tenantPools.overrides`).
+backendToken:
+  enabled: false
+  # Existing Secret holding the default-pool token.
+  secretName: ""
+  secretKey: token
+  # tenant name → {secretName, secretKey} for pools with their own
+  # token. Tenant names are sanitised into env-var names
+  # (SCG_BACKEND_TOKEN_<TENANT>); two tenants that differ only in
+  # punctuation (team-a vs team_a) would collide — avoid that.
+  tenantOverrides: {}
+  # tenantOverrides:
+  #   team-a:
+  #     secretName: team-a-backend-token
+  #     secretKey: token
+
+# How the gateway figures out which tenant each inbound RPC belongs
+# to. The resolved tenant becomes the first segment of the routing
+# key, so two tenants with the same session_id stay isolated.
+#
+# Defaults route every RPC to tenant="default" — the single-tenant
+# baseline. Switch `source` to from_metadata when auth is disabled
+# but clients self-declare a tenant via a gRPC header; switch to
+# always_default to skip the tenant lookup entirely; switch
+# `on_missing: reject` for SaaS-style strict isolation where a
+# missing tenant claim is a misconfiguration.
+tenantResolver:
+  # one of: from_claim | from_metadata | always_default
+  source: from_claim
+  # Header name when source=from_metadata. Default x-tenant.
+  metadataHeader: x-tenant
+  # one of: use_default | reject
+  onMissing: use_default
+  defaultName: default
+
+# Audit logging — emits four security-relevant event types
+# (`session.create`, `session.release`, `auth.failure`, `rpc.error`)
+# through the JSON log pipeline with `target=scg::audit`. Filter on
+# that target in your log aggregator (Loki, Splunk, …) to get a
+# distinct audit stream.
+#
+# `logSuccessfulRpcs: true` additionally emits one `rpc.ok` event for
+# every successful RPC. Off by default — strict monitoring policies
+# only, since it multiplies the audit stream by ~the request rate.
+audit:
+  enabled: true
+  logSuccessfulRpcs: false
+
+# Active gRPC health-check probing for backend pool members. When
+# enabled, the gateway calls `grpc.health.v1.Health/Check` on each
+# backend periodically and removes repeatedly-failing ones from the
+# routing pool. Off by default to avoid breaking deployments where
+# backends don't ship the standard Health service.
+healthCheck:
+  enabled: false
+  intervalSecs: 5
+  timeoutSecs: 2
+  unhealthyThreshold: 3
+  healthyThreshold: 2
+
+# Graceful shutdown: on SIGTERM the gateway flips `/readyz` to 503
+# (so K8s drains it from the Service), then waits for in-flight
+# streaming RPCs to complete up to `deadlineSecs` before forcing
+# termination. Match `terminationGracePeriodSeconds` in the pod
+# spec — a too-short K8s grace will SIGKILL before drain finishes.
+shutdown:
+  deadlineSecs: 30
+
+# Distributed tracing — exports OTLP/gRPC spans to a collector. Off
+# by default; structured JSON logs work regardless.
+tracing:
+  enabled: false
+  endpoint: "http://otel-collector:4317"
+  serviceName: spark-connect-gateway
+  sampleRatio: 1.0
+  exportTimeoutSecs: 10
+
+# ServiceAccount the gateway pods run under. Auto-created by default;
+# the chart attaches RBAC for endpoints get/list/watch when
+# backendDiscovery.type=k8s.
+serviceAccount:
+  create: true
+  # If empty, the helper derives one from release fullname.
+  name: ""
+  annotations: {}
+
+# Opt-in NetworkPolicy enforcing the gateway trust boundary: backend
+# Spark Connect servers only accept gRPC ingress from the gateway
+# pods. The gateway's auth and multi-tenancy guarantees hold only if
+# clients cannot reach the backends directly (the backend trusts
+# UserContext.user_id as presented), so production deployments should
+# enable this — or an equivalent policy — unless the boundary is
+# enforced some other way. Requires a CNI that enforces NetworkPolicy.
+backendNetworkPolicy:
+  enabled: false
+  # Namespace the backend pods run in. Empty = the release namespace.
+  namespace: ""
+  # Pod labels selecting the backend Spark Connect pods. Required
+  # when enabled — the backends are not chart-managed, so the chart
+  # cannot infer them.
+  backendPodLabels: {}
+  # The gRPC port the backends listen on.
+  grpcPort: 15002
+  # Extra ingress rules appended verbatim to the policy. Once a pod
+  # is selected by an Ingress policy, everything not whitelisted is
+  # denied — so whitelist any other legitimate ingress here, e.g.
+  # executor-to-driver traffic on operator-managed clusters, or
+  # Spark UI access. (Kubelet health probes are unaffected.)
+  additionalIngress: []
