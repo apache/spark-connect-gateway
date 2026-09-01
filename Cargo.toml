@@ -30,6 +30,7 @@ members = [
     "crates/healthcheck",
     "crates/pool-k8s",
     "crates/proxy",
+    "crates/gateway",
 ]
 
 [workspace.package]
