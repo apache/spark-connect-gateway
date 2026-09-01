@@ -1,0 +1,38 @@
+Spark Connect Gateway is starting up.
+
+Resources installed:
+
+  Deployment   : {{ include "scg.fullname" . }} (replicas={{ .Values.replicaCount }})
+  Service      : {{ include "scg.fullname" . }} (gRPC :{{ .Values.service.grpcPort }}, admin :{{ .Values.service.adminPort }})
+{{- if .Values.redis.enabled }}
+  Redis (bundled): {{ include "scg.redis.host" . }} (StatefulSet, 1 replica)
+{{- end }}
+{{- if .Values.backendDiscovery }}
+{{- if eq .Values.backendDiscovery.type "k8s" }}
+  RBAC         : Role + RoleBinding granting endpoints get/list/watch in namespace {{ .Values.backendDiscovery.k8s.namespace }}
+{{- end }}
+{{- end }}
+
+Connect a PySpark client to the gateway:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "scg.fullname" . }} {{ .Values.service.grpcPort }}:{{ .Values.service.grpcPort }} &
+  python -c "from pyspark.sql import SparkSession; print(SparkSession.builder.remote('sc://localhost:{{ .Values.service.grpcPort }}').getOrCreate().range(10).count())"
+
+Scrape Prometheus metrics:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "scg.fullname" . }} {{ .Values.service.adminPort }}:{{ .Values.service.adminPort }} &
+  curl http://localhost:{{ .Values.service.adminPort }}/metrics
+
+{{- if eq .Values.auth.type "none" }}
+
+WARNING: auth.type is `none`. Every caller is treated as user_id="anonymous".
+This is fine on a trusted in-cluster network; for external exposure switch
+auth.type to one of static / jwt / oidc.
+{{- end }}
+
+{{- if and (gt (int .Values.replicaCount) 1) (eq .Values.affinityStore.type "memory") }}
+
+ERROR: replicaCount > 1 with affinityStore.type=memory will break Spark Connect's
+session affinity invariant — different replicas will pin the same session to
+different backends. Set affinityStore.type=redis (the default).
+{{- end }}
