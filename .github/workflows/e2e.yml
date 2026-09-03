@@ -1,0 +1,172 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# End-to-end test on a real Kubernetes cluster (kind): builds the gateway image,
+# deploys two Spark Connect servers plus the gateway via the Helm chart, and
+# drives a real PySpark client through it.
+#
+# kind and helm are installed with plain `curl` rather than third-party actions,
+# both to keep the ASF GitHub Actions allowlist happy and to pin exact versions.
+
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  KIND_VERSION: v0.33.0
+  HELM_VERSION: v4.2.4
+  CLUSTER_NAME: scg-e2e
+  NAMESPACE: spark-connect
+
+jobs:
+  e2e-smoke:
+    name: e2e smoke (kind + Helm + PySpark)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install kind and helm
+        run: |
+          set -euo pipefail
+          # Install into ~/.local/bin: writable without sudo, unlike /usr/local/bin
+          # on the hosted runners.
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x "$HOME/.local/bin/kind"
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz -C /tmp linux-amd64/helm
+          install -m 0755 /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/kind" version
+          "$HOME/.local/bin/helm" version --short
+          kubectl version --client
+
+      # Layer-cached across runs so a nightly that only changed manifests does not
+      # pay for a full `cargo build --release` again.
+      - name: Build the gateway image
+        run: docker build -t scg:e2e .
+
+      - name: Create the kind cluster
+        run: kind create cluster --name "$CLUSTER_NAME" --wait 120s
+
+      - name: Load the gateway image into kind
+        run: kind load docker-image scg:e2e --name "$CLUSTER_NAME"
+
+      - name: Deploy the Spark Connect backends
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
+          kubectl --context "kind-${CLUSTER_NAME}" apply \
+            -f deploy/examples/e2e-smoke/spark-connect-server.yaml
+          # First boot pulls the ~700 MiB upstream Spark image.
+          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
+            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+
+      - name: Install the gateway via Helm
+        run: |
+          set -euo pipefail
+          helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
+            -n "$NAMESPACE" -f deploy/examples/e2e-smoke/values.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+
+      - name: Verify the gateway discovered both backends
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            count=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+              deploy/scg --tail=200 2>/dev/null \
+              | grep -o '"message":"k8s pool: backend list updated","count":[0-9]*' \
+              | tail -1 | grep -oE '[0-9]+$' || true)
+            if [ "${count:-0}" = "2" ]; then
+              echo "gateway sees 2 backends"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "gateway never reported 2 backends" >&2
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=100 >&2
+          exit 1
+
+      - name: Run a PySpark client through the gateway
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/e2e-venv
+          # Pin PySpark to the same version as the backend image
+          # (apache/spark:4.0.0). A newer client talks to an older server only up
+          # to a point: pyspark 4.2's createDataFrame reads the SQL config
+          # spark.sql.session.localRelationSizeLimit, which does not exist in
+          # Spark 4.0, and the server answers SQL_CONF_NOT_FOUND.
+          /tmp/e2e-venv/bin/pip install --quiet 'pyspark[connect]==4.0.0'
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          # The repo's own smoke client: asserts range().count(), an explicit-schema
+          # createDataFrame round-trip, and follow-up queries on the same session.
+          /tmp/e2e-venv/bin/python3 test/integration/client_smoke.py sc://localhost:15003
+
+      - name: Verify metrics and audit output
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 9090:9090 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9090/metrics >/dev/null 2>&1 && break
+            sleep 1
+          done
+          metrics=$(curl -fsS http://127.0.0.1:9090/metrics)
+          echo "$metrics" | grep -E '^scg_backend_pool_size 2$'
+          echo "$metrics" | grep -E '^scg_rpcs_total\{.*rpc="ExecutePlan".*\} [1-9]'
+          # The audit sink logs one record per RPC; ExecutePlan must be among them.
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
+            --tail=300 | grep -q '"rpc":"ExecutePlan"'
+
+      - name: Gateway logs (on failure)
+        if: failure()
+        run: |
+          kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" -o wide || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=200 || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+            -l app=spark-connect-server --tail=100 || true
+          kubectl --context "kind-${CLUSTER_NAME}" describe pods -n "$NAMESPACE" || true
+
+      - name: Delete the kind cluster
+        if: always()
+        run: kind delete cluster --name "$CLUSTER_NAME" || true
