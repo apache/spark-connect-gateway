@@ -71,6 +71,19 @@ jobs:
   integration:
     name: integration tests
     runs-on: ubuntu-latest
+    services:
+      # `ha_smoke` expects a Redis on :6399 (overridable via REDIS_URL). The
+      # Redis *tests* below don't use this — they start their own container via
+      # testcontainers.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -104,3 +117,15 @@ jobs:
       # built by itself. Hence `#[ignore]` plus this dedicated step.
       - name: Tracing integration test
         run: cargo test -p scg-proxy --test tracing_integration -- --ignored
+
+      # Two `examples/` binaries assert end-to-end invariants but were only ever
+      # compiled, never executed. They exit non-zero on failure, so run them.
+      # `drain_smoke` is fully in-process; `ha_smoke` needs the Redis service
+      # above to share affinity state between its two gateway replicas.
+      - name: Graceful-drain smoke (in-process)
+        run: cargo run -p scg-proxy --example drain_smoke
+
+      - name: Multi-replica HA smoke (Redis-backed)
+        run: cargo run -p scg-proxy --example ha_smoke
+        env:
+          REDIS_URL: redis://127.0.0.1:6399
