@@ -369,3 +369,182 @@ jobs:
       - name: Delete the kind cluster
         if: always()
         run: kind delete cluster --name "$CLUSTER_NAME" || true
+
+  e2e-trust-boundary:
+    name: e2e trust-boundary (backend token enforcement)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLUSTER_NAME: scg-e2e-trustb
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install kind and helm
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x "$HOME/.local/bin/kind"
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz -C /tmp linux-amd64/helm
+          install -m 0755 /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build the gateway image
+        run: docker build -t scg:e2e .
+
+      - name: Create the kind cluster and load the image
+        run: |
+          set -euo pipefail
+          kind create cluster --name "$CLUSTER_NAME" --wait 120s
+          kind load docker-image scg:e2e --name "$CLUSTER_NAME"
+
+      - name: Deploy the token-enforcing backend
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
+          # One Secret, read by both sides: the backend enforces the token, the
+          # gateway presents it.
+          kubectl --context "kind-${CLUSTER_NAME}" -n "$NAMESPACE" create secret \
+            generic scg-backend-token --from-literal=token="$(openssl rand -hex 32)"
+          kubectl --context "kind-${CLUSTER_NAME}" apply \
+            -f deploy/examples/e2e-trust-boundary/spark-connect-server.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
+            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+
+      - name: Install PySpark
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/e2e-venv
+          # Pinned to the backend image's Spark version; see the e2e-smoke job.
+          /tmp/e2e-venv/bin/pip install --quiet 'pyspark[connect]==4.0.0'
+          # One case per process: getOrCreate() caches sessions, so reusing one
+          # interpreter across URLs would silently reuse the first connection.
+          cat > /tmp/expect_reject.py <<'PY'
+          import sys
+          from pyspark.sql import SparkSession
+
+          url, want_status, want_detail = sys.argv[1], sys.argv[2], sys.argv[3]
+          try:
+              SparkSession.builder.remote(url).getOrCreate().range(1).count()
+          except Exception as e:
+              err = str(e)
+          else:
+              raise SystemExit(f"expected rejection, got success for {url[:40]}")
+          assert want_status in err, f"want {want_status} in: {err[:300]}"
+          assert want_detail in err, f"want {want_detail!r} in: {err[:300]}"
+          print(f"OK rejected: {want_detail}")
+          PY
+
+      # Assertion 1: the backend refuses anything that reaches it without the
+      # token — the port-forward stands in for "any pod that can dial the Service".
+      # This runs before the gateway exists, so nothing can be presenting a token.
+      - name: 'Assertion 1: a direct connection to the backend is refused'
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/spark-connect 15002:15002 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15002) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          /tmp/e2e-venv/bin/python3 /tmp/expect_reject.py "sc://localhost:15002" \
+            UNAUTHENTICATED "No authentication token provided"
+
+      - name: Install the gateway with the backend token
+        run: |
+          set -euo pipefail
+          helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
+            -n "$NAMESPACE" -f deploy/examples/e2e-trust-boundary/values.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
+            --tail=50 | grep -q '"message":"outbound backend authentication enabled"'
+
+      - name: 'Assertion 2: the same client succeeds through the gateway'
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          /tmp/e2e-venv/bin/python3 -c "
+          from pyspark.sql import SparkSession
+          s = SparkSession.builder.remote('sc://localhost:15003').getOrCreate()
+          assert s.range(10).count() == 10
+          s.stop()
+          print('OK: query succeeded through the gateway')
+          "
+
+      # Assertion 3 is the negative control: same gateway, same client, only the
+      # token removed. If this still succeeded, assertion 2 would prove nothing.
+      - name: 'Assertion 3: a tokenless gateway is refused too'
+        run: |
+          set -euo pipefail
+          helm --kube-context "kind-${CLUSTER_NAME}" upgrade scg ./deploy/helm/scg \
+            -n "$NAMESPACE" -f deploy/examples/e2e-trust-boundary/values.yaml \
+            --set backendToken.enabled=false
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          /tmp/e2e-venv/bin/python3 /tmp/expect_reject.py "sc://localhost:15003" \
+            UNAUTHENTICATED "No authentication token provided"
+
+      # Assertion 4: the token layer only holds while clients cannot read the token
+      # back, so the gateway withholds it from Config responses.
+      - name: 'Assertion 4: the token cannot be read back through the gateway'
+        run: |
+          set -euo pipefail
+          helm --kube-context "kind-${CLUSTER_NAME}" upgrade scg ./deploy/helm/scg \
+            -n "$NAMESPACE" -f deploy/examples/e2e-trust-boundary/values.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          /tmp/e2e-venv/bin/python3 -c "
+          from pyspark.sql import SparkSession
+          s = SparkSession.builder.remote('sc://localhost:15003').getOrCreate()
+          tok = s.conf.get('spark.connect.authenticate.token', '<unset>')
+          print('token via gateway =', tok)
+          assert tok in (None, '<unset>'), f'TOKEN LEAKED: {tok!r}'
+          s.stop()
+          print('OK: token withheld from the Config RPC')
+          "
+          # The withholding is auditable.
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
+            --tail=300 | grep -q '"event":"config.redacted"'
+
+      - name: Gateway logs (on failure)
+        if: failure()
+        run: |
+          kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" -o wide || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=200 || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+            -l app=spark-connect-server --tail=100 || true
+          kubectl --context "kind-${CLUSTER_NAME}" describe pods -n "$NAMESPACE" || true
+
+      - name: Delete the kind cluster
+        if: always()
+        run: kind delete cluster --name "$CLUSTER_NAME" || true
