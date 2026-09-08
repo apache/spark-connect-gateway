@@ -170,3 +170,202 @@ jobs:
       - name: Delete the kind cluster
         if: always()
         run: kind delete cluster --name "$CLUSTER_NAME" || true
+
+  e2e-auth-jwt:
+    name: e2e auth-jwt (JWT identity + rejection paths)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLUSTER_NAME: scg-e2e-authjwt
+      JWT_SECRET: e2e-auth-jwt-walkthrough-secret-not-for-production
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install kind and helm
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x "$HOME/.local/bin/kind"
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz -C /tmp linux-amd64/helm
+          install -m 0755 /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build the gateway image
+        run: docker build -t scg:e2e .
+
+      - name: Create the kind cluster and load the image
+        run: |
+          set -euo pipefail
+          kind create cluster --name "$CLUSTER_NAME" --wait 120s
+          kind load docker-image scg:e2e --name "$CLUSTER_NAME"
+
+      - name: Deploy the Spark Connect backends
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
+          kubectl --context "kind-${CLUSTER_NAME}" apply \
+            -f deploy/examples/e2e-auth-jwt/spark-connect-server.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
+            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+
+      - name: Install the gateway with auth.type=jwt
+        run: |
+          set -euo pipefail
+          helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
+            -n "$NAMESPACE" -f deploy/examples/e2e-auth-jwt/values.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+
+      # The point of this walkthrough: the chart's auth block, which the
+      # in-process tests never render.
+      - name: Assert the chart rendered the JWT auth config
+        run: |
+          set -euo pipefail
+          cfg=$(kubectl --context "kind-${CLUSTER_NAME}" get configmap scg-config \
+            -n "$NAMESPACE" -o jsonpath='{.data.config\.yaml}')
+          echo "$cfg" | grep -qE '^\s+type: jwt'
+          echo "$cfg" | grep -qE '^\s+issuer: "scg-e2e-issuer"'
+          echo "$cfg" | grep -qE '^\s+tenant_claim: "tenant"'
+          echo "$cfg" | grep -qE '^\s+groups_claim: "groups"'
+          echo "chart rendered auth.type=jwt with the expected claim mapping"
+
+      - name: Drive PySpark with a valid JWT and check the audit identity
+        run: |
+          set -euo pipefail
+          cat > /tmp/sign-jwt.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SECRET="$1"; CLAIMS="$2"
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          H=$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | b64url)
+          P=$(printf '%s' "$CLAIMS" | b64url)
+          SIG=$(printf '%s' "$H.$P" | openssl dgst -sha256 -hmac "$SECRET" -binary | b64url)
+          printf '%s.%s.%s\n' "$H" "$P" "$SIG"
+          SH
+          chmod +x /tmp/sign-jwt.sh
+
+          python3 -m venv /tmp/e2e-venv
+          # Pinned to the backend image's Spark version; see the e2e-smoke job.
+          /tmp/e2e-venv/bin/pip install --quiet 'pyspark[connect]==4.0.0'
+
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          now=$(date +%s)
+          token=$(/tmp/sign-jwt.sh "$JWT_SECRET" \
+            "{\"sub\":\"alice\",\"iss\":\"scg-e2e-issuer\",\"aud\":\"scg\",\"exp\":$((now+600)),\"iat\":$now,\"tenant\":\"team-a\",\"groups\":[\"devs\",\"admins\"]}")
+          /tmp/e2e-venv/bin/python3 - "$token" <<'PY'
+          import sys
+          from pyspark.sql import SparkSession
+          s = SparkSession.builder.remote(f"sc://localhost:15003/;token={sys.argv[1]}").getOrCreate()
+          assert s.range(10).count() == 10
+          s.stop()
+          print("valid JWT accepted")
+          PY
+
+          # The sub/tenant/groups claims must reach the audit pipeline: user_id
+          # has to be alice, not anonymous.
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
+            --tail=200 | grep '"event":"session.create"' | tail -1 > /tmp/audit.json
+          python3 - <<'PY'
+          import json
+          f = json.load(open("/tmp/audit.json"))["fields"]
+          assert f["user_id"] == "alice", f
+          assert f["tenant"] == "team-a", f
+          assert f["groups"] == "devs,admins", f
+          print("audit identity:", f["user_id"], f["tenant"], f["groups"])
+          PY
+
+      - name: Drive the rejection paths
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          # One case per process, on purpose: SparkSession.getOrCreate() returns a
+          # cached session, so running several attempts in one interpreter would
+          # silently reuse the first URL's credentials and never exercise the
+          # later cases.
+          cat > /tmp/expect_reject.py <<'PY'
+          import sys
+          from pyspark.sql import SparkSession
+
+          url, want_status, want_detail = sys.argv[1], sys.argv[2], sys.argv[3]
+          try:
+              SparkSession.builder.remote(url).getOrCreate().range(1).count()
+          except Exception as e:
+              err = str(e)
+          else:
+              raise SystemExit(f"expected rejection, got success for {url[:40]}...")
+          assert want_status in err, f"want {want_status} in: {err[:300]}"
+          assert want_detail in err, f"want {want_detail!r} in: {err[:300]}"
+          print(f"OK rejected: {want_detail}")
+          PY
+
+          now=$(date +%s); past=$((now - 7200))
+          expired=$(/tmp/sign-jwt.sh "$JWT_SECRET" \
+            "{\"sub\":\"alice\",\"iss\":\"scg-e2e-issuer\",\"aud\":\"scg\",\"exp\":$past,\"iat\":$((past-100))}")
+          wrong=$(/tmp/sign-jwt.sh "wrong-secret" \
+            "{\"sub\":\"alice\",\"iss\":\"scg-e2e-issuer\",\"aud\":\"scg\",\"exp\":$((now+600)),\"iat\":$now}")
+
+          # Both signature-validation failures must report the SAME generic
+          # message: distinguishing "expired" from "bad signature" tells an
+          # attacker which half to work on.
+          /tmp/e2e-venv/bin/python3 /tmp/expect_reject.py \
+            "sc://localhost:15003/;token=$expired" UNAUTHENTICATED "invalid JWT"
+          /tmp/e2e-venv/bin/python3 /tmp/expect_reject.py \
+            "sc://localhost:15003/;token=$wrong" UNAUTHENTICATED "invalid JWT"
+          /tmp/e2e-venv/bin/python3 /tmp/expect_reject.py \
+            "sc://localhost:15003" UNAUTHENTICATED \
+            "missing or malformed Authorization: Bearer header"
+
+      - name: Assert the failures were audited and counted
+        run: |
+          set -euo pipefail
+          # The audit reasons are a small fixed set and must not leak specifics.
+          reasons=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+            deploy/scg --tail=400 | grep '"event":"auth.failure"' \
+            | grep -oE '"reason":"[a-z_]+"' | sort -u)
+          echo "$reasons"
+          echo "$reasons" | grep -q '"reason":"invalid_token"'
+          echo "$reasons" | grep -q '"reason":"missing_token"'
+
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 9090:9090 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9090/metrics >/dev/null 2>&1 && break
+            sleep 1
+          done
+          metrics=$(curl -fsS http://127.0.0.1:9090/metrics)
+          echo "$metrics" | grep -E '^scg_auth_failures_total\{reason="invalid_token"\} [1-9]'
+          echo "$metrics" | grep -E '^scg_auth_failures_total\{reason="missing_token"\} [1-9]'
+
+      - name: Gateway logs (on failure)
+        if: failure()
+        run: |
+          kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" -o wide || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=200 || true
+          kubectl --context "kind-${CLUSTER_NAME}" describe pods -n "$NAMESPACE" || true
+
+      - name: Delete the kind cluster
+        if: always()
+        run: kind delete cluster --name "$CLUSTER_NAME" || true
