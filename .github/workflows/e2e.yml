@@ -15,9 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# End-to-end test on a real Kubernetes cluster (kind): builds the gateway image,
-# deploys two Spark Connect servers plus the gateway via the Helm chart, and
-# drives a real PySpark client through it.
+# End-to-end tests on a real Kubernetes cluster (kind): each job builds the
+# gateway image, deploys Spark Connect backends plus the gateway via the Helm
+# chart, and drives a real PySpark client through it. The jobs differ in what
+# they configure and assert -- baseline routing, JWT identity, the backend trust
+# boundary, and per-tenant pool isolation -- and each runs its own cluster so
+# they stay independent.
 #
 # kind and helm are installed with plain `curl` rather than third-party actions,
 # both to keep the ASF GitHub Actions allowlist happy and to pin exact versions.
@@ -543,6 +546,284 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=200 || true
           kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
             -l app=spark-connect-server --tail=100 || true
+          kubectl --context "kind-${CLUSTER_NAME}" describe pods -n "$NAMESPACE" || true
+
+      - name: Delete the kind cluster
+        if: always()
+        run: kind delete cluster --name "$CLUSTER_NAME" || true
+
+  e2e-multitenant:
+    name: e2e multitenant (per-tenant pool routing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLUSTER_NAME: scg-e2e-mtenant
+      JWT_SECRET: e2e-multitenant-walkthrough-secret-not-for-production
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install kind and helm
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x "$HOME/.local/bin/kind"
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz -C /tmp linux-amd64/helm
+          install -m 0755 /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build the gateway image
+        run: docker build -t scg:e2e .
+
+      - name: Create the kind cluster and load the image
+        run: |
+          set -euo pipefail
+          kind create cluster --name "$CLUSTER_NAME" --wait 120s
+          kind load docker-image scg:e2e --name "$CLUSTER_NAME"
+
+      # Two independent Spark Connect Deployments + Services, one per tenant, so
+      # each tenant's pool has exactly one backend IP and the audit log's
+      # `backend` field names the tenant unambiguously.
+      - name: Deploy the two per-tenant Spark Connect backends
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
+          kubectl --context "kind-${CLUSTER_NAME}" apply \
+            -f deploy/examples/e2e-multitenant/spark-connect-server.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
+            -l 'app in (spark-connect-team-a,spark-connect-team-b)' \
+            -n "$NAMESPACE" --timeout=600s
+
+      - name: Record each tenant's backend endpoint
+        run: |
+          set -euo pipefail
+          for team in team-a team-b; do
+            ip=$(kubectl --context "kind-${CLUSTER_NAME}" get endpointslices \
+              -n "$NAMESPACE" \
+              -l "kubernetes.io/service-name=spark-connect-${team}" \
+              -o jsonpath='{.items[0].endpoints[0].addresses[0]}')
+            test -n "$ip"
+            # Env var names cannot contain a hyphen, so team-a becomes TEAM_A.
+            echo "BACKEND_${team//-/_}=${ip}:15002" | tr '[:lower:]' '[:upper:]' \
+              >> "$GITHUB_ENV"
+            echo "${team} backend = ${ip}:15002"
+          done
+
+      - name: Install the gateway with per-tenant pool overrides
+        run: |
+          set -euo pipefail
+          helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
+            -n "$NAMESPACE" -f deploy/examples/e2e-multitenant/values.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+
+      # The chart's tenantPools.overrides templating and the strict-mode
+      # "no default pool" path are rendered nowhere else in CI.
+      - name: Assert the chart rendered both tenant pool overrides
+        run: |
+          set -euo pipefail
+          cfg=$(kubectl --context "kind-${CLUSTER_NAME}" get configmap scg-config \
+            -n "$NAMESPACE" -o jsonpath='{.data.config\.yaml}')
+          echo "$cfg" | grep -qE '^\s+on_unknown_tenant: "reject"'
+          echo "$cfg" | grep -qE '^\s+service_name: "spark-connect-team-a"'
+          echo "$cfg" | grep -qE '^\s+service_name: "spark-connect-team-b"'
+          echo "$cfg" | grep -qE '^\s+source: from_claim'
+          echo "$cfg" | grep -qE '^\s+on_missing: "reject"'
+          echo "chart rendered both tenant overrides under the reject policy"
+
+      # One K8s Endpoints watcher per override pool, and no default pool at all.
+      - name: Assert the gateway started one watcher per tenant pool
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            logs=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+              deploy/scg --tail=200 2>/dev/null || true)
+            ready=$(echo "$logs" \
+              | grep -c '"message":"tenant override pool ready"' || true)
+            pools=$(echo "$logs" \
+              | grep -c '"message":"k8s pool: backend list updated","count":1' || true)
+            if [ "$ready" -ge 2 ] && [ "$pools" -ge 2 ]; then
+              echo "$logs" | grep -q 'no default pool configured'
+              echo "two tenant pools ready, each with one backend, no default pool"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "tenant pools never became ready" >&2
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=100 >&2
+          exit 1
+
+      - name: Install PySpark and the JWT signer
+        run: |
+          set -euo pipefail
+          cat > /tmp/sign-jwt.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SECRET="$1"; CLAIMS="$2"
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          H=$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | b64url)
+          P=$(printf '%s' "$CLAIMS" | b64url)
+          SIG=$(printf '%s' "$H.$P" | openssl dgst -sha256 -hmac "$SECRET" -binary | b64url)
+          printf '%s.%s.%s\n' "$H" "$P" "$SIG"
+          SH
+          chmod +x /tmp/sign-jwt.sh
+          python3 -m venv /tmp/e2e-venv
+          # Pinned to the backend image's Spark version; see the e2e-smoke job.
+          /tmp/e2e-venv/bin/pip install --quiet 'pyspark[connect]==4.0.0'
+          # One case per process: getOrCreate() caches sessions, so reusing one
+          # interpreter across tokens would silently reuse the first identity.
+          cat > /tmp/expect_reject.py <<'PY'
+          import sys
+          from pyspark.sql import SparkSession
+
+          url, want_status, want_detail = sys.argv[1], sys.argv[2], sys.argv[3]
+          try:
+              SparkSession.builder.remote(url).getOrCreate().range(1).count()
+          except Exception as e:
+              err = str(e)
+          else:
+              raise SystemExit(f"expected rejection, got success for {url[:40]}")
+          assert want_status in err, f"want {want_status} in: {err[:300]}"
+          assert want_detail in err, f"want {want_detail!r} in: {err[:300]}"
+          print(f"OK rejected: {want_detail}")
+          PY
+
+      # The core assertion: two tenants, two JWTs, two pools. Each session must
+      # land on its own tenant's pod and never the other's. Both queries also
+      # have to actually succeed — routing to the right pool is only meaningful
+      # if the RPC completes against a real Spark backend.
+      - name: 'Assertion 1: each tenant is routed to its own backend pool'
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          now=$(date +%s)
+          for pair in "alice:team-a:engineers" "bob:team-b:analysts"; do
+            user=${pair%%:*}; rest=${pair#*:}
+            tenant=${rest%%:*}; group=${rest#*:}
+            token=$(/tmp/sign-jwt.sh "$JWT_SECRET" \
+              "{\"sub\":\"$user\",\"iss\":\"scg-e2e-issuer\",\"aud\":\"scg\",\"exp\":$((now+900)),\"iat\":$now,\"tenant\":\"$tenant\",\"groups\":[\"$group\"]}")
+            /tmp/e2e-venv/bin/python3 - "$token" "$user" <<'PY'
+          import sys
+          from pyspark.sql import SparkSession
+          s = SparkSession.builder.remote(
+              f"sc://localhost:15003/;token={sys.argv[1]}").getOrCreate()
+          assert s.range(10).count() == 10
+          s.stop()
+          print(f"{sys.argv[2]}: query succeeded through the gateway")
+          PY
+          done
+
+          # The audit log is what proves isolation: the `backend` recorded for
+          # each tenant must be that tenant's own Endpoint, captured earlier.
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
+            --tail=300 | grep '"event":"session.create"' > /tmp/sessions.jsonl
+          python3 - <<PY
+          import json
+
+          want = {"team-a": "${BACKEND_TEAM_A}", "team-b": "${BACKEND_TEAM_B}"}
+          assert all(want.values()), f"backend IPs not captured: {want}"
+          seen = {}
+          for line in open("/tmp/sessions.jsonl"):
+              f = json.loads(line)["fields"]
+              seen.setdefault(f["tenant"], set()).add(f["backend"])
+          print("tenant -> backends:", {k: sorted(v) for k, v in seen.items()})
+          assert set(seen) == set(want), f"tenants {sorted(seen)} != {sorted(want)}"
+          for tenant, backends in seen.items():
+              assert backends == {want[tenant]}, (
+                  f"{tenant} reached {sorted(backends)}, expected {want[tenant]}")
+          users = {json.loads(l)["fields"]["user_id"] for l in open("/tmp/sessions.jsonl")}
+          assert users == {"alice", "bob"}, users
+          print("each tenant reached only its own pool")
+          PY
+
+      # Both rejects are rendered by the same config, but they are different
+      # mechanisms and must not collapse into one status code: an unknown tenant
+      # is authenticated-but-not-permitted, a missing claim never identified a
+      # tenant at all.
+      - name: 'Assertion 2: unknown and missing tenants are rejected differently'
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          now=$(date +%s)
+          ghost=$(/tmp/sign-jwt.sh "$JWT_SECRET" \
+            "{\"sub\":\"mallory\",\"iss\":\"scg-e2e-issuer\",\"aud\":\"scg\",\"exp\":$((now+900)),\"iat\":$now,\"tenant\":\"team-ghost\"}")
+          notenant=$(/tmp/sign-jwt.sh "$JWT_SECRET" \
+            "{\"sub\":\"nobody\",\"iss\":\"scg-e2e-issuer\",\"aud\":\"scg\",\"exp\":$((now+900)),\"iat\":$now}")
+
+          # Valid signature, but the tenant has no pool -> PermissionDenied.
+          # The status name is grpc's own enum spelling (StatusCode.PERMISSION_DENIED),
+          # the same form the auth-jwt job matches UNAUTHENTICATED on.
+          /tmp/e2e-venv/bin/python3 /tmp/expect_reject.py \
+            "sc://localhost:15003/;token=$ghost" PERMISSION_DENIED \
+            'tenant "team-ghost" has no configured pool'
+          # Valid signature, no tenant claim at all -> Unauthenticated.
+          /tmp/e2e-venv/bin/python3 /tmp/expect_reject.py \
+            "sc://localhost:15003/;token=$notenant" UNAUTHENTICATED \
+            "tenant required but not provided"
+
+      # A reject that is not recorded is not enforcement an operator can see.
+      - name: 'Assertion 3: the rejects were audited and counted'
+        run: |
+          set -euo pipefail
+          logs=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+            deploy/scg --tail=500)
+
+          # Only the two successful sessions bound a backend; neither reject did.
+          test "$(echo "$logs" | grep -c '"event":"session.create"')" = 2
+
+          # Unknown tenant surfaces as rpc.error; a missing claim is an auth
+          # failure with its own reason. Different events, on purpose.
+          echo "$logs" | grep '"event":"rpc.error"' \
+            | grep -q 'tenant \\"team-ghost\\" has no configured pool'
+          echo "$logs" | grep '"event":"auth.failure"' \
+            | grep -q '"reason":"missing_tenant"'
+
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 9090:9090 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9090/metrics >/dev/null 2>&1 && break
+            sleep 1
+          done
+          metrics=$(curl -fsS http://127.0.0.1:9090/metrics)
+          echo "$metrics" | grep -E '^scg_auth_failures_total\{reason="missing_tenant"\} [1-9]'
+          echo "$metrics" | grep -E '^scg_rpcs_total\{code="PermissionDenied".*\} [1-9]'
+          # Documented behaviour: the unlabelled gauge tracks the default pool
+          # only, and strict multi-tenant mode has no default pool. A non-zero
+          # value here would mean a default pool got configured after all.
+          echo "$metrics" | grep -E '^scg_backend_pool_size 0$'
+          echo "rejects audited and counted"
+
+      - name: Gateway logs (on failure)
+        if: failure()
+        run: |
+          kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" -o wide || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=200 || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+            -l app=spark-connect-team-a --tail=100 || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+            -l app=spark-connect-team-b --tail=100 || true
           kubectl --context "kind-${CLUSTER_NAME}" describe pods -n "$NAMESPACE" || true
 
       - name: Delete the kind cluster
