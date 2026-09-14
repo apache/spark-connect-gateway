@@ -92,16 +92,22 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-smoke/spark-connect-server.yaml
           # First boot pulls the ~700 MiB upstream Spark image.
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+          # `rollout status`, not `wait --for=condition=ready pod`: a label-selector
+          # wait fails outright with "no matching resources found" when the
+          # ReplicaSet has not produced a pod yet, and --timeout does not cover
+          # that window. Rollout completion already implies the readiness probe
+          # passed, so this is the same guarantee without the race.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+            deployment/spark-connect-server -n "$NAMESPACE" --timeout=600s
 
       - name: Install the gateway via Helm
         run: |
           set -euo pipefail
           helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
             -n "$NAMESPACE" -f deploy/examples/e2e-smoke/values.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+          # See the backend step: rollout status avoids the empty-selector race.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
 
       - name: Verify the gateway discovered both backends
         run: |
@@ -213,16 +219,18 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-auth-jwt/spark-connect-server.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+          # rollout status avoids the empty-selector race; see the e2e-smoke job.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+            deployment/spark-connect-server -n "$NAMESPACE" --timeout=600s
 
       - name: Install the gateway with auth.type=jwt
         run: |
           set -euo pipefail
           helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
             -n "$NAMESPACE" -f deploy/examples/e2e-auth-jwt/values.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+          # See the backend step: rollout status avoids the empty-selector race.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
 
       # The point of this walkthrough: the chart's auth block, which the
       # in-process tests never render.
@@ -415,8 +423,9 @@ jobs:
             generic scg-backend-token --from-literal=token="$(openssl rand -hex 32)"
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-trust-boundary/spark-connect-server.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+          # rollout status avoids the empty-selector race; see the e2e-smoke job.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+            deployment/spark-connect-server -n "$NAMESPACE" --timeout=600s
 
       - name: Install PySpark
         run: |
@@ -594,9 +603,12 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-multitenant/spark-connect-server.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l 'app in (spark-connect-team-a,spark-connect-team-b)' \
-            -n "$NAMESPACE" --timeout=600s
+          # See the other jobs: rollout status avoids the empty-selector race.
+          # One call per tenant Deployment; both must finish rolling out.
+          for team in team-a team-b; do
+            kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+              "deployment/spark-connect-${team}" -n "$NAMESPACE" --timeout=600s
+          done
 
       - name: Record each tenant's backend endpoint
         run: |
@@ -618,8 +630,9 @@ jobs:
           set -euo pipefail
           helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
             -n "$NAMESPACE" -f deploy/examples/e2e-multitenant/values.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+          # See the backend step: rollout status avoids the empty-selector race.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
 
       # The chart's tenantPools.overrides templating and the strict-mode
       # "no default pool" path are rendered nowhere else in CI.
@@ -874,8 +887,9 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-multi-replica-redis/spark-connect-server.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+          # rollout status avoids the empty-selector race; see the e2e-smoke job.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+            deployment/spark-connect-server -n "$NAMESPACE" --timeout=600s
 
       # Two gateway replicas plus the chart's bundled Redis StatefulSet. This is
       # the only job that renders the chart's Redis topology (StatefulSet + PVC +
