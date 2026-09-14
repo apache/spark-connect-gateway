@@ -164,8 +164,11 @@ jobs:
           echo "$metrics" | grep -E '^scg_backend_pool_size 2$'
           echo "$metrics" | grep -E '^scg_rpcs_total\{.*rpc="ExecutePlan".*\} [1-9]'
           # The audit sink logs one record per RPC; ExecutePlan must be among them.
-          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
-            --tail=300 | grep -q '"rpc":"ExecutePlan"'
+          # Captured into a variable rather than piped: under `set -o pipefail`,
+          # `grep -q` closes the pipe on its first match, `kubectl logs` takes
+          # SIGPIPE, and the step fails with 141 even though the assertion held.
+          audit=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=300)
+          grep -q '"rpc":"ExecutePlan"' <<<"$audit"
 
       - name: Gateway logs (on failure)
         if: failure()
@@ -475,8 +478,9 @@ jobs:
             -n "$NAMESPACE" -f deploy/examples/e2e-trust-boundary/values.yaml
           kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
             -n "$NAMESPACE" --timeout=300s
-          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
-            --tail=50 | grep -q '"message":"outbound backend authentication enabled"'
+          # Not piped: see the e2e-smoke job's note on grep -q and SIGPIPE.
+          startup=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=50)
+          grep -q '"message":"outbound backend authentication enabled"' <<<"$startup"
 
       - name: 'Assertion 2: the same client succeeds through the gateway'
         run: |
@@ -544,9 +548,9 @@ jobs:
           s.stop()
           print('OK: token withheld from the Config RPC')
           "
-          # The withholding is auditable.
-          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
-            --tail=300 | grep -q '"event":"config.redacted"'
+          # The withholding is auditable. Not piped: see the e2e-smoke note.
+          redact=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=300)
+          grep -q '"event":"config.redacted"' <<<"$redact"
 
       - name: Gateway logs (on failure)
         if: failure()
@@ -924,8 +928,10 @@ jobs:
             exit 1
           }
           for p in $pods; do
-            kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" "$p" \
-              --tail=50 | grep -q '"affinity_store":"redis"'
+            # Not piped: see the e2e-smoke note on grep -q and SIGPIPE.
+            plog=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+              "$p" --tail=50)
+            grep -q '"affinity_store":"redis"' <<<"$plog"
             echo "$p: affinity_store=redis"
           done
 
@@ -1034,8 +1040,9 @@ jobs:
           # rather than a specific rpc name -- which RPC carries the query is a
           # client-version detail. Unary RPCs log "forwarding" and streaming ones
           # log "forwarding stream", so accept either; both carry session and addr.
-          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" "$new" \
-            --tail=300 | grep -E '"message":"forwarding( stream)?"' \
+          # Not piped from kubectl: see the e2e-smoke note on SIGPIPE.
+          fwd=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" "$new" --tail=300)
+          grep -E '"message":"forwarding( stream)?"' <<<"$fwd" \
             | grep -q "\"session\":\"${SESSION_ID}\".*\"addr\":\"${BOUND_BACKEND}\""
           echo "replacement replica routed to $BOUND_BACKEND, read from Redis"
 
