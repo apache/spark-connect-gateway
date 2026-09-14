@@ -829,3 +829,246 @@ jobs:
       - name: Delete the kind cluster
         if: always()
         run: kind delete cluster --name "$CLUSTER_NAME" || true
+
+  e2e-multi-replica-redis:
+    name: e2e multi-replica (Redis affinity store)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CLUSTER_NAME: scg-e2e-redis
+      # Fixed so the Redis key is predictable; PySpark would generate a random one.
+      # Must be a canonical v4 UUID: PySpark validates the session_id parameter
+      # with uuid.UUID(s, version=4), which rewrites the version/variant nibbles
+      # rather than rejecting a non-v4 string -- so a sloppy id would still be
+      # accepted but no longer match what we build the Redis key from here.
+      SESSION_ID: aaaaaaaa-bbbb-4ccc-9ddd-eeeeeeeeeeee
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install kind and helm
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x "$HOME/.local/bin/kind"
+          curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+            | tar -xz -C /tmp linux-amd64/helm
+          install -m 0755 /tmp/linux-amd64/helm "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build the gateway image
+        run: docker build -t scg:e2e .
+
+      - name: Create the kind cluster and load the image
+        run: |
+          set -euo pipefail
+          kind create cluster --name "$CLUSTER_NAME" --wait 120s
+          kind load docker-image scg:e2e --name "$CLUSTER_NAME"
+
+      - name: Deploy the Spark Connect backends
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
+          kubectl --context "kind-${CLUSTER_NAME}" apply \
+            -f deploy/examples/e2e-multi-replica-redis/spark-connect-server.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
+            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+
+      # Two gateway replicas plus the chart's bundled Redis StatefulSet. This is
+      # the only job that renders the chart's Redis topology (StatefulSet + PVC +
+      # Service + the synthesized redis:// URL).
+      - name: Install the gateway with 2 replicas and bundled Redis
+        run: |
+          set -euo pipefail
+          helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
+            -n "$NAMESPACE" -f deploy/examples/e2e-multi-replica-redis/values.yaml
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status statefulset/scg-redis \
+            -n "$NAMESPACE" --timeout=300s
+          kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE"
+
+      # Both replicas must have chosen the Redis store. `memory` here would mean
+      # values.yaml did not take effect, and every later assertion would be
+      # meaningless -- a memory store cannot share anything across replicas.
+      - name: 'Assertion 1: both replicas use the Redis affinity store'
+        run: |
+          set -euo pipefail
+          pods=$(kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" \
+            -l app.kubernetes.io/name=scg,app.kubernetes.io/component=gateway \
+            -o jsonpath='{.items[*].metadata.name}')
+          # Guard against the selector matching nothing (or the Redis pod), which
+          # would let the loop below pass without checking anything.
+          count=$(echo "$pods" | wc -w)
+          test "$count" -eq 2 || {
+            echo "expected 2 gateway pods, got $count: $pods" >&2
+            kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" \
+              --show-labels >&2
+            exit 1
+          }
+          for p in $pods; do
+            kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" "$p" \
+              --tail=50 | grep -q '"affinity_store":"redis"'
+            echo "$p: affinity_store=redis"
+          done
+
+      - name: Install PySpark
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/e2e-venv
+          # Pinned to the backend image's Spark version; see the e2e-smoke job.
+          /tmp/e2e-venv/bin/pip install --quiet 'pyspark[connect]==4.0.0'
+
+      # Bind a session through the Service (either replica), then read the binding
+      # straight out of Redis: it proves the state left the pod, which is the whole
+      # point of the Redis store.
+      - name: 'Assertion 2: the session binding is written to Redis'
+        run: |
+          set -euo pipefail
+          # Nothing may pre-exist, or a stale key could satisfy the assertions below.
+          test -z "$(kubectl --context "kind-${CLUSTER_NAME}" exec -n "$NAMESPACE" \
+            statefulset/scg-redis -- redis-cli KEYS 'scg:s:*' | tr -d '\r')"
+
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          # A fixed session_id keeps the Redis key predictable. PySpark accepts one
+          # via the session_id URL parameter.
+          /tmp/e2e-venv/bin/python3 - "$SESSION_ID" <<'PY'
+          import sys
+          from pyspark.sql import SparkSession
+          s = SparkSession.builder.remote(
+              f"sc://localhost:15003/;session_id={sys.argv[1]}").getOrCreate()
+          assert s.range(10).count() == 10
+          s.range(50).createOrReplaceTempView("t")
+          assert s.sql("SELECT count(*) FROM t").collect()[0][0] == 50
+          print("query and temp view succeeded through the gateway")
+          PY
+
+          key="scg:s:default|anonymous|${SESSION_ID}"
+          backend=$(kubectl --context "kind-${CLUSTER_NAME}" exec -n "$NAMESPACE" \
+            statefulset/scg-redis -- redis-cli GET "$key" | tr -d '\r')
+          test -n "$backend"
+          # The value must be one of the real backend pod IPs, not any old string.
+          kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" \
+            -l app=spark-connect-server \
+            -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}' > /tmp/ips
+          grep -qx "${backend%:15002}" /tmp/ips
+          ttl=$(kubectl --context "kind-${CLUSTER_NAME}" exec -n "$NAMESPACE" \
+            statefulset/scg-redis -- redis-cli TTL "$key" | tr -d '\r')
+          test "$ttl" -gt 0 -a "$ttl" -le 3600
+          echo "BOUND_BACKEND=$backend" >> "$GITHUB_ENV"
+          echo "binding in Redis: $key -> $backend (ttl ${ttl}s)"
+
+      # The claim that matters: kill the replica that owns nothing, and a client
+      # arriving at the REPLACEMENT pod still reaches the original backend. A
+      # memory store could not do this -- the binding died with the pod.
+      - name: 'Assertion 3: affinity survives a replica being killed'
+        run: |
+          set -euo pipefail
+          before=$(kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" \
+            -l app.kubernetes.io/name=scg,app.kubernetes.io/component=gateway \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl --context "kind-${CLUSTER_NAME}" delete pod -n "$NAMESPACE" "$before"
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
+
+          # The newest pod is the replacement; it has never seen this session.
+          new=$(kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" \
+            -l app.kubernetes.io/name=scg,app.kubernetes.io/component=gateway \
+            --sort-by=.metadata.creationTimestamp \
+            -o jsonpath='{.items[-1:].metadata.name}')
+          test "$new" != "$before"
+          echo "killed $before, replacement is $new"
+
+          key="scg:s:default|anonymous|${SESSION_ID}"
+          after=$(kubectl --context "kind-${CLUSTER_NAME}" exec -n "$NAMESPACE" \
+            statefulset/scg-redis -- redis-cli GET "$key" | tr -d '\r')
+          test "$after" = "$BOUND_BACKEND"
+          echo "binding unchanged after the restart: $after"
+
+          # Forward to the replacement pod DIRECTLY (not the Service) so the RPC
+          # cannot be served by the surviving replica.
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            "pod/$new" 15004:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15004) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          /tmp/e2e-venv/bin/python3 - "$SESSION_ID" <<'PY'
+          import sys
+          from pyspark.sql import SparkSession
+          s = SparkSession.builder.remote(
+              f"sc://localhost:15004/;session_id={sys.argv[1]}").getOrCreate()
+          assert s.range(4).count() == 4
+          print("replacement replica served the same session")
+          PY
+
+          # The replacement's own log must name the original backend: it could only
+          # have learned that address from Redis. Matched on the forwarding message
+          # rather than a specific rpc name -- which RPC carries the query is a
+          # client-version detail. Unary RPCs log "forwarding" and streaming ones
+          # log "forwarding stream", so accept either; both carry session and addr.
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" "$new" \
+            --tail=300 | grep -E '"message":"forwarding( stream)?"' \
+            | grep -q "\"session\":\"${SESSION_ID}\".*\"addr\":\"${BOUND_BACKEND}\""
+          echo "replacement replica routed to $BOUND_BACKEND, read from Redis"
+
+      # Without this, assertion 3 could pass on a gateway that always picks the
+      # same backend regardless of affinity. Fresh sessions must be free to land
+      # on either pod, so pinning is a property of the binding, not of the pool.
+      - name: 'Assertion 4: fresh sessions are not pinned to that backend'
+        run: |
+          set -euo pipefail
+          kubectl --context "kind-${CLUSTER_NAME}" port-forward -n "$NAMESPACE" \
+            svc/scg 15003:15003 &
+          pf=$!
+          trap 'kill $pf 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/15003) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          for i in $(seq 1 8); do
+            /tmp/e2e-venv/bin/python3 - "$i" <<'PY' || true
+          import sys
+          from pyspark.sql import SparkSession
+          sid = f"ffffffff-0000-4000-8000-{int(sys.argv[1]):012d}"
+          s = SparkSession.builder.remote(
+              f"sc://localhost:15003/;session_id={sid}").getOrCreate()
+          s.range(2).count()
+          PY
+          done
+          distinct=$(for k in $(kubectl --context "kind-${CLUSTER_NAME}" exec \
+              -n "$NAMESPACE" statefulset/scg-redis -- \
+              redis-cli KEYS 'scg:s:default|anonymous|ffffffff-*' | tr -d '\r'); do
+            kubectl --context "kind-${CLUSTER_NAME}" exec -n "$NAMESPACE" \
+              statefulset/scg-redis -- redis-cli GET "$k" | tr -d '\r'
+          done | sort -u | wc -l)
+          echo "fresh sessions spread over $distinct distinct backends"
+          test "$distinct" -eq 2
+
+      - name: Gateway and Redis logs (on failure)
+        if: failure()
+        run: |
+          kubectl --context "kind-${CLUSTER_NAME}" get pods -n "$NAMESPACE" -o wide --show-labels || true
+          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+            -l app.kubernetes.io/name=scg --tail=200 --prefix || true
+          kubectl --context "kind-${CLUSTER_NAME}" exec -n "$NAMESPACE" \
+            statefulset/scg-redis -- redis-cli KEYS 'scg:*' || true
+          kubectl --context "kind-${CLUSTER_NAME}" get pvc -n "$NAMESPACE" || true
+          kubectl --context "kind-${CLUSTER_NAME}" describe pods -n "$NAMESPACE" || true
+
+      - name: Delete the kind cluster
+        if: always()
+        run: kind delete cluster --name "$CLUSTER_NAME" || true
