@@ -1,0 +1,59 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Families whose crates share types across their public APIs: raising one
+    # crate on its own leaves two major versions of the family in the dependency
+    # graph, and the traits stop lining up. Such a PR cannot be made green by
+    # rerunning it, so grouping is what makes these updates reviewable at all.
+    groups:
+      # The whole OpenTelemetry family, including `tracing-opentelemetry`, whose
+      # version is offset by one minor (0.33 tracks opentelemetry 0.32). A
+      # single-crate bump here was closed as unmergeable; see SPARK-59548.
+      opentelemetry:
+        patterns:
+          - "opentelemetry"
+          - "opentelemetry-*"
+          - "opentelemetry_*"
+          - "tracing-opentelemetry"
+      # tonic and prost move together: tonic-prost depends on both, tonic-health
+      # depends on tonic and tonic-prost, and opentelemetry-proto depends on
+      # tonic and prost as well.
+      tonic-prost:
+        patterns:
+          - "tonic"
+          - "tonic-*"
+          - "prost"
+          - "prost-*"
+      # kube depends on k8s-openapi, and k8s-openapi's version selects the
+      # Kubernetes API version its generated types target, so the two have to
+      # agree.
+      kube:
+        patterns:
+          - "kube"
+          - "k8s-openapi"
+    ignore:
+      # Rust dependencies are pinned by minor here and the lockfile is committed,
+      # so patch-level PRs are noise; a real patch pickup rides along with the
+      # next minor bump or a deliberate `cargo update`.
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-patch
