@@ -1,0 +1,49 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The Dockerfile does `COPY . .`, so everything not excluded here is sent to the
+# daemon as build context. A populated `target/` alone is tens of gigabytes,
+# which is slow enough locally to look like a hang. CI never noticed because a
+# fresh checkout has none of these.
+#
+# Keep in mind what the build DOES need: the crates, `proto/` (genproto's
+# build.rs reads it and panics if empty), `Cargo.toml`, `Cargo.lock` and
+# `rust-toolchain.toml`.
+
+# Rust build output — rebuilt inside the image anyway, and the host's artifacts
+# are for a different target triple.
+target/
+
+# Version control and CI definitions.
+.git/
+.gitattributes
+.gitignore
+.github/
+
+# Python virtualenvs used by dev tooling (merge_spark_pr.py, walkthrough clients).
+.venv/
+__pycache__/
+*.pyc
+
+# Docs and deployment manifests: not compiled into the binary.
+docs/
+deploy/
+test/
+*.md
+
+# Editor and OS noise.
+.idea/
+.vscode/
+.DS_Store

@@ -92,16 +92,22 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-smoke/spark-connect-server.yaml
           # First boot pulls the ~700 MiB upstream Spark image.
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+          # `rollout status`, not `wait --for=condition=ready pod`: a label-selector
+          # wait fails outright with "no matching resources found" when the
+          # ReplicaSet has not produced a pod yet, and --timeout does not cover
+          # that window. Rollout completion already implies the readiness probe
+          # passed, so this is the same guarantee without the race.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+            deployment/spark-connect-server -n "$NAMESPACE" --timeout=600s
 
       - name: Install the gateway via Helm
         run: |
           set -euo pipefail
           helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
             -n "$NAMESPACE" -f deploy/examples/e2e-smoke/values.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+          # See the backend step: rollout status avoids the empty-selector race.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
 
       - name: Verify the gateway discovered both backends
         run: |
@@ -158,8 +164,11 @@ jobs:
           echo "$metrics" | grep -E '^scg_backend_pool_size 2$'
           echo "$metrics" | grep -E '^scg_rpcs_total\{.*rpc="ExecutePlan".*\} [1-9]'
           # The audit sink logs one record per RPC; ExecutePlan must be among them.
-          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
-            --tail=300 | grep -q '"rpc":"ExecutePlan"'
+          # Captured into a variable rather than piped: under `set -o pipefail`,
+          # `grep -q` closes the pipe on its first match, `kubectl logs` takes
+          # SIGPIPE, and the step fails with 141 even though the assertion held.
+          audit=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=300)
+          grep -q '"rpc":"ExecutePlan"' <<<"$audit"
 
       - name: Gateway logs (on failure)
         if: failure()
@@ -213,16 +222,18 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-auth-jwt/spark-connect-server.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+          # rollout status avoids the empty-selector race; see the e2e-smoke job.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+            deployment/spark-connect-server -n "$NAMESPACE" --timeout=600s
 
       - name: Install the gateway with auth.type=jwt
         run: |
           set -euo pipefail
           helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
             -n "$NAMESPACE" -f deploy/examples/e2e-auth-jwt/values.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+          # See the backend step: rollout status avoids the empty-selector race.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
 
       # The point of this walkthrough: the chart's auth block, which the
       # in-process tests never render.
@@ -415,8 +426,9 @@ jobs:
             generic scg-backend-token --from-literal=token="$(openssl rand -hex 32)"
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-trust-boundary/spark-connect-server.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+          # rollout status avoids the empty-selector race; see the e2e-smoke job.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+            deployment/spark-connect-server -n "$NAMESPACE" --timeout=600s
 
       - name: Install PySpark
         run: |
@@ -466,8 +478,9 @@ jobs:
             -n "$NAMESPACE" -f deploy/examples/e2e-trust-boundary/values.yaml
           kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
             -n "$NAMESPACE" --timeout=300s
-          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
-            --tail=50 | grep -q '"message":"outbound backend authentication enabled"'
+          # Not piped: see the e2e-smoke job's note on grep -q and SIGPIPE.
+          startup=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=50)
+          grep -q '"message":"outbound backend authentication enabled"' <<<"$startup"
 
       - name: 'Assertion 2: the same client succeeds through the gateway'
         run: |
@@ -535,9 +548,9 @@ jobs:
           s.stop()
           print('OK: token withheld from the Config RPC')
           "
-          # The withholding is auditable.
-          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg \
-            --tail=300 | grep -q '"event":"config.redacted"'
+          # The withholding is auditable. Not piped: see the e2e-smoke note.
+          redact=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" deploy/scg --tail=300)
+          grep -q '"event":"config.redacted"' <<<"$redact"
 
       - name: Gateway logs (on failure)
         if: failure()
@@ -594,9 +607,12 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-multitenant/spark-connect-server.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l 'app in (spark-connect-team-a,spark-connect-team-b)' \
-            -n "$NAMESPACE" --timeout=600s
+          # See the other jobs: rollout status avoids the empty-selector race.
+          # One call per tenant Deployment; both must finish rolling out.
+          for team in team-a team-b; do
+            kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+              "deployment/spark-connect-${team}" -n "$NAMESPACE" --timeout=600s
+          done
 
       - name: Record each tenant's backend endpoint
         run: |
@@ -618,8 +634,9 @@ jobs:
           set -euo pipefail
           helm --kube-context "kind-${CLUSTER_NAME}" install scg ./deploy/helm/scg \
             -n "$NAMESPACE" -f deploy/examples/e2e-multitenant/values.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app.kubernetes.io/name=scg -n "$NAMESPACE" --timeout=300s
+          # See the backend step: rollout status avoids the empty-selector race.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status deployment/scg \
+            -n "$NAMESPACE" --timeout=300s
 
       # The chart's tenantPools.overrides templating and the strict-mode
       # "no default pool" path are rendered nowhere else in CI.
@@ -874,8 +891,9 @@ jobs:
           kubectl --context "kind-${CLUSTER_NAME}" create namespace "$NAMESPACE"
           kubectl --context "kind-${CLUSTER_NAME}" apply \
             -f deploy/examples/e2e-multi-replica-redis/spark-connect-server.yaml
-          kubectl --context "kind-${CLUSTER_NAME}" wait --for=condition=ready pod \
-            -l app=spark-connect-server -n "$NAMESPACE" --timeout=600s
+          # rollout status avoids the empty-selector race; see the e2e-smoke job.
+          kubectl --context "kind-${CLUSTER_NAME}" rollout status \
+            deployment/spark-connect-server -n "$NAMESPACE" --timeout=600s
 
       # Two gateway replicas plus the chart's bundled Redis StatefulSet. This is
       # the only job that renders the chart's Redis topology (StatefulSet + PVC +
@@ -910,8 +928,10 @@ jobs:
             exit 1
           }
           for p in $pods; do
-            kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" "$p" \
-              --tail=50 | grep -q '"affinity_store":"redis"'
+            # Not piped: see the e2e-smoke note on grep -q and SIGPIPE.
+            plog=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" \
+              "$p" --tail=50)
+            grep -q '"affinity_store":"redis"' <<<"$plog"
             echo "$p: affinity_store=redis"
           done
 
@@ -1020,8 +1040,9 @@ jobs:
           # rather than a specific rpc name -- which RPC carries the query is a
           # client-version detail. Unary RPCs log "forwarding" and streaming ones
           # log "forwarding stream", so accept either; both carry session and addr.
-          kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" "$new" \
-            --tail=300 | grep -E '"message":"forwarding( stream)?"' \
+          # Not piped from kubectl: see the e2e-smoke note on SIGPIPE.
+          fwd=$(kubectl --context "kind-${CLUSTER_NAME}" logs -n "$NAMESPACE" "$new" --tail=300)
+          grep -E '"message":"forwarding( stream)?"' <<<"$fwd" \
             | grep -q "\"session\":\"${SESSION_ID}\".*\"addr\":\"${BOUND_BACKEND}\""
           echo "replacement replica routed to $BOUND_BACKEND, read from Redis"
 
