@@ -61,13 +61,13 @@ prost-types = "0.14"
 # Logging + telemetry
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "grpc-tonic", "tls-ring", "tls-webpki-roots"] }
-opentelemetry-semantic-conventions = "0.31"
-opentelemetry-stdout = "0.31"
-opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic", "trace"] }
-tracing-opentelemetry = "0.32"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring", "tls-webpki-roots"] }
+opentelemetry-semantic-conventions = "0.32"
+opentelemetry-stdout = "0.32"
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic", "trace"] }
+tracing-opentelemetry = "0.33"
 
 # Config + utilities
 serde = { version = "1", features = ["derive"] }
