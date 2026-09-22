@@ -44,4 +44,4 @@ tokio = { workspace = true }
 wiremock = "0.6"
 rsa = "0.9"
 rand = "0.8"
-base64 = "0.22"
+base64 = "0.23"
