@@ -414,8 +414,10 @@ crates/
   observability/  # metrics, tracing, admin server
   config/         # YAML config loader
   genproto/       # tonic-generated bindings for spark.connect.*
-proto/spark/connect/
-  *.proto        # vendored read-only mirror of upstream
+proto/
+  PROVENANCE.md  # where the vendored protos came from, and how to re-sync
+  spark/connect/
+    *.proto      # vendored read-only mirror of upstream
 deploy/examples/
   spark-connect-server/  # K8s manifests (apache/spark-kubernetes-operator)
 test/integration/
@@ -433,6 +435,15 @@ cargo build -p scg-genproto
 ```
 
 `protoc` must be on `$PATH` (e.g. `brew install protobuf`).
+
+That regenerates the Rust bindings from the `.proto` files already in the tree.
+Updating the `.proto` files themselves against upstream Spark is a separate
+thing — see [proto/PROVENANCE.md](proto/PROVENANCE.md) for which revision they
+correspond to and how they drift, and `dev/sync-protos.sh` to check or re-sync:
+
+```bash
+dev/sync-protos.sh          # report drift against the recorded baseline
+```
 
 ## What ships today
 
