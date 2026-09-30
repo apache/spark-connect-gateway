@@ -25,7 +25,7 @@ maintained here, and they are not generated: they are checked-in schema source.
 |---|---|
 | Upstream project | `apache/spark` |
 | Upstream path | `sql/connect/common/src/main/protobuf/spark/connect/` |
-| Baseline revision | `v4.2.0` (see *Which revision* below) |
+| Revision | `v4.2.0` — the vendored files match it exactly |
 | Files vendored | all 11 `.proto` files in that directory |
 | License | Apache-2.0 — the same license as this project; each file keeps its ASF header |
 
@@ -36,37 +36,24 @@ the directory and fails if it is empty.
 
 ## Which revision
 
-The vendored copy predates the `v4.2.0` release. It matches `v4.2.0` exactly for
-9 of the 11 files, and the files themselves refer to fields "deprecated since
-Spark 4.2+", so it was taken from the Spark 4.2 development line — but from an
-untagged commit, not from a release. No `v4.2.0-rcN` tag matches either.
+The vendored files are byte-identical to `v4.2.0`, synced by
+`dev/sync-protos.sh --sync --ref v4.2.0` (SPARK-59857). `dev/sync-protos.sh`
+with no arguments confirms this and reports `identical: 11`.
 
-`v4.2.0` is recorded as the baseline revision because it is the earliest
-*released* tag the vendored copy is consistent with, which makes it a meaningful
-thing to diff against. It is not a claim that these files were taken from that
-tag.
+`v4.2.0` was chosen because it is the newest *released* Spark tag. `v4.3.0` exists
+only as release candidates, and syncing to an rc would pin the gateway to a
+protocol that can still change before release.
 
-Two files differ from `v4.2.0`, in both cases because upstream has content the
-vendored copy does not:
+### History
 
-| File | Missing relative to `v4.2.0` |
-|---|---|
-| `spark/connect/relations.proto` | the `NearestByJoin` message and its `Relation.rel_type` entry |
-| `spark/connect/pipelines.proto` | the `AutoCdcFlowDetails` message and its `import "spark/connect/expressions.proto"` |
-
-Both are pure additions upstream: nothing in the vendored files was edited
-locally. In other words the vendored protos are slightly **behind** upstream, not
-forked from it.
-
-This does not currently affect the gateway. It forwards each
-`SparkConnectService` request onward as a whole and only ever reads the
-session and identity metadata — nothing in `crates/proxy` inspects a plan's
-`rel_type` or walks the relation tree. So a request carrying one of these newer
-messages is still routed and forwarded correctly.
-
-What the gap does mean is that anything which needs to *inspect* one of those
-newer messages — a routing rule keyed on plan shape, say — would have to re-sync
-first.
+The original vendored copy — everything before SPARK-59857 — predated the
+`v4.2.0` release. It matched `v4.2.0` for 9 of the 11 files and the files
+referenced fields "deprecated since Spark 4.2+", but no release tag matched it,
+including `v4.2.0-rc1` through `rc5`: it came from an untagged commit on the
+Spark 4.2 development line. It was behind upstream rather than forked from it,
+missing the `NearestByJoin` message in `relations.proto` and
+`AutoCdcFlowDetails` in `pipelines.proto`; the sync added both. Nothing had been
+edited locally, then or now.
 
 ## Checking and re-syncing
 
@@ -100,11 +87,28 @@ gateway speaks. After a `--sync`:
 A re-sync is worth reviewing on its own rather than folding into an unrelated
 change, since it moves the wire protocol.
 
+## How protocol drift affects the gateway
+
+Useful context when deciding how urgent a re-sync is: the gateway forwards each
+`SparkConnectService` request onward whole and reads only the session and identity
+metadata. Nothing in `crates/proxy` inspects a plan's `rel_type` or walks the
+relation tree, and nothing in the workspace matches on those enums, so a request
+carrying a message type the vendored protos do not know about is still routed and
+forwarded correctly.
+
+The one place that does look inside a message is `crates/proxy/src/config_filter.rs`,
+which matches on `ConfigRequest.operation.op_type` to withhold the backend token —
+unrelated to the relation and plan types.
+
+So falling behind upstream degrades gracefully. It becomes a real problem only for
+something that needs to *inspect* a newer message, such as a routing rule keyed on
+plan shape.
+
 ## For a release
 
 These files are third-party content redistributed in the source release. They
 are Apache-2.0 licensed and retain their upstream ASF headers, so they need no
 separate entry in `LICENSE`, but the source release's `NOTICE`-side paperwork
-should account for them as sourced from `apache/spark`. That belongs with the
-`LICENSE-binary` / `NOTICE-binary` dependency-census work, which is still
-outstanding.
+should account for them as sourced from `apache/spark` at the revision recorded
+above. That belongs with the `LICENSE-binary` / `NOTICE-binary` dependency-census
+work, which is still outstanding.
