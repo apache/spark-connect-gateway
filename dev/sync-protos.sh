@@ -33,8 +33,9 @@
 
 set -euo pipefail
 
-# The revision proto/PROVENANCE.md records as the comparison baseline. Bump this
-# together with that file whenever the vendored protos are re-synced.
+# The upstream revision proto/PROVENANCE.md records the vendored files as being
+# at. Bump this together with that file whenever the protos are re-synced, so the
+# two never disagree about what proto/ contains.
 UPSTREAM_REF="v4.2.0"
 
 # Upstream location of the protocol definitions within apache/spark.
