@@ -196,6 +196,11 @@ impl SelectionStrategy for RoundRobinStrategy {
 /// network call. The in-memory impl wraps its sync work in async-fn
 /// signatures with no `await` points, so callers pay only the
 /// trait-object dispatch cost.
+// `async_trait` expands each method into one returning a `#[must_use]`
+// `Pin<Box<dyn Future>>`, and clippy 1.99's double_must_use then objects that the
+// inner type (a `Result`/`Option`/`String`) is already must-use. The attribute is
+// the macro's, not ours, so there is nothing here to restructure.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AffinityStore: Send + Sync + 'static {
     async fn lookup_session(&self, key: &SessionKey) -> Option<String>;

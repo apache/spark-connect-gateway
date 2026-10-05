@@ -57,6 +57,11 @@ use tonic::Status;
 ///
 /// Implementations must be `Send + Sync + 'static` so the gateway can
 /// hold them in an `Arc` and clone references into per-request futures.
+// `async_trait` expands each method into one returning a `#[must_use]`
+// `Pin<Box<dyn Future>>`, and clippy 1.99's double_must_use then objects that the
+// inner type (a `Result`/`Option`/`String`) is already must-use. The attribute is
+// the macro's, not ours, so there is nothing here to restructure.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Authenticator: Send + Sync + 'static {
     /// Inspect `metadata`, validate any credential present, and return
