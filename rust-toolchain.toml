@@ -14,5 +14,15 @@
 # limitations under the License.
 
 [toolchain]
-channel = "stable"
+# Pinned rather than "stable" on purpose. A floating channel means CI can turn
+# red on a commit that changed nothing, whenever upstream Rust ships a new lint
+# or changes behaviour -- and it did: clippy 1.99 added double_must_use, which
+# fires on every `#[async_trait]` trait in the workspace. A pinned version makes
+# the build reproducible between contributors and CI, and turns a toolchain
+# upgrade into a reviewable change of its own.
+#
+# To move it: bump this, run `cargo clippy --workspace --all-targets -- -D
+# warnings` and `cargo test --workspace` locally on the new version, and fix what
+# the new toolchain finds in the same PR.
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]
