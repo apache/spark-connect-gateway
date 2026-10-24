@@ -58,7 +58,7 @@ use tonic::transport::Server;
 use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Open-source Spark Connect Gateway")]
+#[command(version, about = "Apache Spark Connect Gateway")]
 struct Args {
     /// Path to YAML config file.
     #[arg(long, default_value = "config.yaml")]

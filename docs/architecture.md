@@ -548,9 +548,6 @@ Reading order, depending on what you're after:
 | Trace an audit event to its source | `crates/audit/src/lib.rs` — one method per event type |
 | Reproduce perf numbers | `crates/proxy/examples/load.rs` — six scenarios documented in [`perf-baseline.md`](perf-baseline.md) |
 
-The implementation plan that drove the build-out lives in the
-sibling repo at
-[`../plans/IMPLEMENTATION-PLAN-OSS-Spark-Connect-Gateway.md`](../../plans/IMPLEMENTATION-PLAN-OSS-Spark-Connect-Gateway.md)
-— it has the phase-by-phase task list and the rationale for
-several "why is it like this" decisions that aren't visible from
-the code alone.
+The project was proposed in the SPIP
+[SPARK-58455](https://issues.apache.org/jira/browse/SPARK-58455), which
+states the problem it solves and links to the design document.
