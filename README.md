@@ -41,7 +41,7 @@ detail and links to the design document.
   `ExecutePlan` streams.
 - `hyper` has best-in-class HTTP/2 trailing-header support, which gRPC
   requires.
-- Aligns with [`Kimahriman/spark-connect-proxy`][5], the only existing OSS
+- Aligns with [`Kimahriman/spark-connect-proxy`][3], the only existing OSS
   Spark-Connect-native proxy.
 
 ## Quick start
@@ -504,5 +504,5 @@ Apache 2.0.
 
 [1]: https://spark.apache.org/docs/latest/spark-connect-overview.html
 [2]: https://issues.apache.org/jira/browse/SPARK-58455
+[3]: https://github.com/Kimahriman/spark-connect-proxy
 [4]: https://github.com/apache/spark-kubernetes-operator
-[5]: https://github.com/Kimahriman/spark-connect-proxy
