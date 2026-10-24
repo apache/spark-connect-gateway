@@ -1,11 +1,11 @@
-# spark-connect-gateway
+# Apache Spark Connect Gateway
 
 A stateless gRPC proxy that fronts a pool of [Apache Spark Connect][1]
 servers, providing session affinity, multi-tenant routing, auth, and
 observability features the open-source server intentionally leaves out.
 
 > Rust workspace built with [`tonic`](https://github.com/hyperium/tonic).
-> Production-ready surface: JWT/OIDC auth, K8s service-watch discovery,
+> Features: JWT/OIDC auth, K8s service-watch discovery,
 > Redis-backed multi-replica HA, per-tenant routing + rate limiting,
 > structured audit logging, Prometheus metrics, OpenTelemetry tracing,
 > Helm chart with sensible defaults.
@@ -30,9 +30,9 @@ observability features the open-source server intentionally leaves out.
 Open-source Spark Connect ships an excellent client-server protocol but
 deliberately leaves multi-instance coordination out of scope. For anything
 beyond a single Spark driver — multi-tenant platforms, HA, fleet-level
-observability — you need a layer in front of the servers. See
-[`OPEN_SOURCE_SPARK_CONNECT_GATEWAY_ANALYSIS.md`][3] in the plan repo for
-the full motivation and competitive landscape.
+observability — you need a layer in front of the servers. The SPIP that
+proposed this project, [SPARK-58455][2], explains the motivation in more
+detail and links to the design document.
 
 ## Why Rust?
 
@@ -503,7 +503,6 @@ pull request you agree that your contribution is licensed under
 Apache 2.0.
 
 [1]: https://spark.apache.org/docs/latest/spark-connect-overview.html
-[2]: ../plans/IMPLEMENTATION-PLAN-OSS-Spark-Connect-Gateway.md
-[3]: ../plans/OPEN_SOURCE_SPARK_CONNECT_GATEWAY_ANALYSIS.md
+[2]: https://issues.apache.org/jira/browse/SPARK-58455
 [4]: https://github.com/apache/spark-kubernetes-operator
 [5]: https://github.com/Kimahriman/spark-connect-proxy
