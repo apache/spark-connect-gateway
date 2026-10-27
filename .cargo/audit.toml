@@ -26,4 +26,12 @@ ignore = [
     # private-key use is test-only. Tracked by SPARK-60369, which also lists
     # the conditions for removing this entry.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0387, crypto-bigint 0.5: timing variability in operations
+    # meant to be constant-time. The fix (0.7.6) is not reachable: it arrives
+    # through jsonwebtoken's p256 / p384 (ES256 / ES384) via elliptic-curve
+    # 0.13. The gateway only verifies those signatures with public keys; every
+    # private-key use is test-only. Tracked by SPARK-60591, which also lists
+    # the conditions for removing this entry.
+    "RUSTSEC-2026-0387",
 ]
