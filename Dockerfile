@@ -13,10 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM rust:1.82-slim AS build
+# The builder's Rust version matches rust-toolchain.toml, so the build uses the
+# image's toolchain. rustup only adds the rustfmt and clippy components that
+# rust-toolchain.toml lists, rather than installing a second toolchain.
+#
+# Its Debian release must match the runtime image below (bookworm, i.e.
+# distroless *-debian12). The binary is linked against the builder's glibc and
+# requires the symbol versions found there. glibc is only backward compatible,
+# so a builder on a newer Debian can produce a binary that fails to start on
+# the runtime image with "version `GLIBC_x.yy' not found". Move both together.
+FROM rust:1.99.0-slim-bookworm AS build
 WORKDIR /src
+# protoc and the well-known-type .proto files, for crates/genproto. No OpenSSL:
+# TLS is rustls, so nothing links against libssl.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    protobuf-compiler libprotobuf-dev pkg-config libssl-dev && \
+    protobuf-compiler libprotobuf-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --release --bin gateway

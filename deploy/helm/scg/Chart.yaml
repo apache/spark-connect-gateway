@@ -16,7 +16,7 @@
 apiVersion: v2
 name: scg
 description: |
-  Open-source Spark Connect Gateway — stateless gRPC proxy in front of a
+  Apache Spark Connect Gateway — stateless gRPC proxy in front of a
   pool of Apache Spark Connect servers. Provides session affinity,
   multi-tenant routing, JWT/OIDC authentication, Prometheus metrics, and
   OpenTelemetry trace export. Multi-replica HA via a shared Redis
