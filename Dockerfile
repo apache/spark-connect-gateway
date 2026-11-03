@@ -30,7 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler libprotobuf-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN cargo build --release --bin gateway
+# --locked builds exactly the dependency versions in the committed Cargo.lock,
+# and fails instead of re-resolving if it is out of date.
+RUN cargo build --release --locked --bin gateway
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/gateway /gateway
