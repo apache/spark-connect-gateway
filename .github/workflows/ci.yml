@@ -59,14 +59,17 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      # Every cargo command below passes --locked: without it, cargo silently
+      # re-resolves on the runner when Cargo.lock is out of date with the
+      # manifests, and the job passes with a lockfile that was never committed.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   integration:
     name: integration tests
@@ -107,7 +110,7 @@ jobs:
       # a Docker daemon, and these tests bring up their own Redis container via
       # testcontainers, so run them explicitly here.
       - name: Redis integration tests
-        run: cargo test -p scg-store-redis -p scg-ratelimit -- --ignored
+        run: cargo test -p scg-store-redis -p scg-ratelimit --locked -- --ignored
 
       # Run the OpenTelemetry tracing test on its own, not as part of a
       # workspace-wide run. Cargo unifies features across the workspace, and with
@@ -116,16 +119,16 @@ jobs:
       # application spans, so the test's span assertions only hold when it is
       # built by itself. Hence `#[ignore]` plus this dedicated step.
       - name: Tracing integration test
-        run: cargo test -p scg-proxy --test tracing_integration -- --ignored
+        run: cargo test -p scg-proxy --test tracing_integration --locked -- --ignored
 
       # Two `examples/` binaries assert end-to-end invariants but were only ever
       # compiled, never executed. They exit non-zero on failure, so run them.
       # `drain_smoke` is fully in-process; `ha_smoke` needs the Redis service
       # above to share affinity state between its two gateway replicas.
       - name: Graceful-drain smoke (in-process)
-        run: cargo run -p scg-proxy --example drain_smoke
+        run: cargo run -p scg-proxy --example drain_smoke --locked
 
       - name: Multi-replica HA smoke (Redis-backed)
-        run: cargo run -p scg-proxy --example ha_smoke
+        run: cargo run -p scg-proxy --example ha_smoke --locked
         env:
           REDIS_URL: redis://127.0.0.1:6399
