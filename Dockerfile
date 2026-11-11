@@ -36,5 +36,12 @@ RUN cargo build --release --locked --bin gateway
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/gateway /gateway
+# The license and notice of the binary distribution. LICENSE-binary lists the
+# third-party code linked into the gateway binary and refers to licenses/ for
+# the license texts; dev/check-license-binary.py keeps it in step with
+# Cargo.lock.
+COPY LICENSE-binary /LICENSE
+COPY NOTICE-binary /NOTICE
+COPY licenses-binary /licenses
 EXPOSE 15003
 ENTRYPOINT ["/gateway"]
