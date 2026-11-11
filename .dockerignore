@@ -42,6 +42,8 @@ docs/
 deploy/
 test/
 *.md
+# ...except license files that happen to be Markdown, which the image ships.
+!licenses-binary/**
 
 # Editor and OS noise.
 .idea/
