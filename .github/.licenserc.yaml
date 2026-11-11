@@ -23,6 +23,10 @@ header:
   paths-ignore:
     - "LICENSE"
     - "NOTICE"
+    - "LICENSE-binary"
+    - "NOTICE-binary"
+    # Third-party license files, kept as their crates ship them
+    - "licenses-binary"
     - ".asf.yaml"
     - ".gitignore"
     - ".gitattributes"
